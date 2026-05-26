@@ -1,5 +1,5 @@
 {%- match kind -%}
-{%- when TapbackKind::Reaction { tapback, who } -%}{{ tapback }} by {{ who }}
-{%- when TapbackKind::Sticker { payload, who } -%}{{ payload }} from {{ who }}
-{%- when TapbackKind::StickerMissing { who } -%}Sticker from {{ who }} not found!
+{%- when TapbackKind::Reaction { tapback, who } -%}{{ tapback }} {{ action_label }}by {{ who }}{{ time_suffix }}
+{%- when TapbackKind::Sticker { payload, who } -%}{{ payload }} from {{ who }}{{ time_suffix }}
+{%- when TapbackKind::StickerMissing { who } -%}Sticker from {{ who }} not found!{{ time_suffix }}
 {%- endmatch -%}

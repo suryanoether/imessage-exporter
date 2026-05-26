@@ -164,6 +164,13 @@ pub(super) struct StickerVM<'a> {
 #[template(path = "tapback.txt")]
 pub(super) struct TapbackVM<'a> {
     pub kind: TapbackKind<'a, String>,
+    /// `""` for added tapbacks, `"removed "` for removed tapbacks in
+    /// forensic mode. Inserted between the kind label and the `by <who>`
+    /// clause.
+    pub action_label: &'static str,
+    /// Empty outside forensic mode, otherwise ` (<timestamp>)`. Appended
+    /// to the rendered line.
+    pub time_suffix: String,
 }
 
 #[derive(Template)]

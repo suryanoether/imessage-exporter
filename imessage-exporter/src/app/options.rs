@@ -43,6 +43,7 @@ pub const OPTION_CONVERSATION_FILTER: &str = "conversation-filter";
 pub const OPTION_CLEARTEXT_PASSWORD: &str = "cleartext-password";
 pub const OPTION_CUSTOM_CONTACTS_DB_PATH: &str = "contacts-path";
 pub const OPTION_NO_PROGRESS: &str = "no-progress";
+pub const OPTION_FORENSIC: &str = "forensic";
 
 // Other CLI Text
 pub const SUPPORTED_FILE_TYPES: &str = "txt, html";
@@ -89,6 +90,8 @@ pub struct Options {
     pub contacts_path: Option<PathBuf>,
     /// If false, suppress the export progress bar regardless of TTY state
     pub show_progress: bool,
+    /// If true, render tapback removals and add timestamps to every tapback
+    pub forensic: bool,
 }
 
 // MARK: Validation
@@ -111,6 +114,7 @@ impl Options {
         let cleartext_password: Option<&String> = args.get_one(OPTION_CLEARTEXT_PASSWORD);
         let contacts_path: Option<&String> = args.get_one(OPTION_CUSTOM_CONTACTS_DB_PATH);
         let show_progress = !args.get_flag(OPTION_NO_PROGRESS);
+        let forensic = args.get_flag(OPTION_FORENSIC);
 
         // Build the export type
         let export_type: Option<ExportType> = match export_file_type {
@@ -133,6 +137,7 @@ impl Options {
                 (custom_name.is_some(), OPTION_CUSTOM_NAME),
                 (use_caller_id, OPTION_USE_CALLER_ID),
                 (conversation_filter.is_some(), OPTION_CONVERSATION_FILTER),
+                (forensic, OPTION_FORENSIC),
             ];
             for (set, opt) in format_deps {
                 if set {
@@ -154,6 +159,7 @@ impl Options {
             (use_caller_id, OPTION_USE_CALLER_ID),
             (custom_name.is_some(), OPTION_CUSTOM_NAME),
             (conversation_filter.is_some(), OPTION_CONVERSATION_FILTER),
+            (forensic, OPTION_FORENSIC),
         ];
         for (set, opt) in diag_conflicts {
             if diagnostic && set {
@@ -272,6 +278,7 @@ impl Options {
             cleartext_password: cleartext_password.cloned(),
             contacts_path: contacts_path.cloned().map(PathBuf::from),
             show_progress,
+            forensic,
         })
     }
 
@@ -475,6 +482,13 @@ fn get_command() -> Command {
                 .action(ArgAction::SetTrue)
                 .display_order(16),
         )
+        .arg(
+            Arg::new(OPTION_FORENSIC)
+                .long(OPTION_FORENSIC)
+                .help("Render forensic detail on tapbacks\nIncludes the timestamp of each tapback and surfaces tapback removal events\n(`<kind> removed by <who>` with the removal timestamp). Default exports hide\nremovals because they overlap with the addition record they cancelled.\n")
+                .action(ArgAction::SetTrue)
+                .display_order(17),
+        )
 }
 
 #[cfg(test)]
@@ -501,6 +515,7 @@ impl Options {
             cleartext_password: None,
             contacts_path: None,
             show_progress: true,
+            forensic: false,
         }
     }
 }
@@ -551,6 +566,7 @@ mod arg_tests {
             cleartext_password: None,
             contacts_path: None,
             show_progress: true,
+            forensic: false,
         };
 
         assert_eq!(actual, expected);
@@ -635,6 +651,7 @@ mod arg_tests {
             cleartext_password: None,
             contacts_path: None,
             show_progress: true,
+            forensic: false,
         };
 
         assert_eq!(actual, expected);
@@ -670,6 +687,7 @@ mod arg_tests {
             cleartext_password: None,
             contacts_path: None,
             show_progress: true,
+            forensic: false,
         };
 
         assert_eq!(actual, expected);
@@ -751,6 +769,7 @@ mod arg_tests {
             cleartext_password: None,
             contacts_path: None,
             show_progress: true,
+            forensic: false,
         };
 
         assert_eq!(actual, expected);
@@ -791,6 +810,7 @@ mod arg_tests {
             cleartext_password: Some("password".to_string()),
             contacts_path: None,
             show_progress: true,
+            forensic: false,
         };
 
         assert_eq!(actual, expected);
@@ -847,6 +867,7 @@ mod arg_tests {
             cleartext_password: None,
             contacts_path: None,
             show_progress: true,
+            forensic: false,
         };
 
         assert_eq!(actual, expected);
@@ -879,6 +900,7 @@ mod arg_tests {
             cleartext_password: None,
             contacts_path: None,
             show_progress: true,
+            forensic: false,
         };
 
         assert_eq!(actual, expected);
@@ -912,6 +934,7 @@ mod arg_tests {
             cleartext_password: None,
             contacts_path: None,
             show_progress: true,
+            forensic: false,
         };
 
         assert_eq!(actual, expected);
@@ -944,6 +967,7 @@ mod arg_tests {
             cleartext_password: None,
             contacts_path: None,
             show_progress: true,
+            forensic: false,
         };
 
         assert_eq!(actual, expected);
@@ -976,6 +1000,7 @@ mod arg_tests {
             cleartext_password: None,
             contacts_path: None,
             show_progress: true,
+            forensic: false,
         };
 
         assert_eq!(actual, expected);
@@ -1050,6 +1075,7 @@ mod arg_tests {
             cleartext_password: None,
             contacts_path: None,
             show_progress: true,
+            forensic: false,
         };
 
         assert_eq!(actual, expected);

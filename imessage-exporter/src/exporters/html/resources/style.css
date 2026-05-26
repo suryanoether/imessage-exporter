@@ -253,6 +253,23 @@ div.tapback {
     align-items: center;
 }
 
+.tapback_time {
+    font-size: 0.75em;
+    color: var(--muted-text);
+    margin-top: 0.1em;
+}
+
+.tapback_removed {
+    opacity: 0.7;
+    text-decoration: line-through;
+    text-decoration-thickness: 1px;
+}
+
+.tapback_removed .tapback_time {
+    text-decoration: none;
+    opacity: 1;
+}
+
 span[class^="animation"] {
     text-shadow: #000 0 0 10px;
 }

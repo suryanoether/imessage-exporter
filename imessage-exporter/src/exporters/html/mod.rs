@@ -31,7 +31,11 @@ use crate::{
 };
 
 use imessage_database::{
-    message_types::{edited::EditedMessage, text_effects::TextEffect, variants::Announcement},
+    message_types::{
+        edited::EditedMessage,
+        text_effects::TextEffect,
+        variants::{Announcement, TapbackAction},
+    },
     tables::{
         attachment::{Attachment, MediaType},
         messages::{
@@ -214,13 +218,32 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
     }
 
     fn format_tapback(&self, msg: &Message) -> Result<String, RuntimeError> {
-        let Some(kind) = resolve_tapback(msg, self.config, |sticker| {
+        let Some(resolved) = resolve_tapback(msg, self.config, |sticker| {
             Html::trust(self.format_sticker(sticker, msg))
         })?
         else {
             return Ok(String::new());
         };
-        Ok(render_template(&TapbackVM { kind }))
+        let (action_label, extra_class, time_html) = match &resolved.forensic {
+            None => ("", "", Html::trust(String::new())),
+            Some(f) => {
+                let (action_label, extra_class) = match f.action {
+                    TapbackAction::Added => ("", ""),
+                    TapbackAction::Removed => ("removed ", " tapback_removed"),
+                };
+                let time_html = Html::trust(format!(
+                    "<div class=\"tapback_time\">{}</div>",
+                    f.timestamp
+                ));
+                (action_label, extra_class, time_html)
+            }
+        };
+        Ok(render_template(&TapbackVM {
+            kind: resolved.kind,
+            action_label,
+            extra_class,
+            time_html,
+        }))
     }
 
     fn format_announcement(&self, msg: &Message, out: &mut String) {
@@ -1633,6 +1656,151 @@ mod tests {
 
         let actual = exporter.format_tapback(&message).unwrap();
         let expected = "";
+
+        assert_eq!(actual, expected);
+    }
+
+    // MARK: Forensic mode tapback tests
+
+    #[test]
+    fn forensic_html_tapback_added_reaction_includes_timestamp() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(2000);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "<span class=\"tapback\"><b>Loved</b> by Sample Contact<div class=\"tapback_time\">May 17, 2022  5:29:42 PM</div></span>";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn forensic_html_tapback_removed_reaction_renders_with_timestamp() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(3000);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "<span class=\"tapback tapback_removed\"><b>Loved</b> removed by Sample Contact<div class=\"tapback_time\">May 17, 2022  5:29:42 PM</div></span>";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn forensic_html_tapback_added_custom_emoji_includes_timestamp() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(2006);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+        message.associated_message_emoji = Some("☕️".to_string());
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "<span class=\"tapback\"><b>☕\u{fe0f}</b> by Sample Contact<div class=\"tapback_time\">May 17, 2022  5:29:42 PM</div></span>";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn forensic_html_tapback_removed_custom_emoji_renders() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(3006);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+        message.associated_message_emoji = Some("☕️".to_string());
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "<span class=\"tapback tapback_removed\"><b>☕\u{fe0f}</b> removed by Sample Contact<div class=\"tapback_time\">May 17, 2022  5:29:42 PM</div></span>";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn forensic_html_tapback_removed_sticker_renders_textually() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(3007);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+        message.num_attachments = 1;
+        message.rowid = 452567;
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "<span class=\"tapback tapback_removed\"><b>Sticker</b> removed by Sample Contact<div class=\"tapback_time\">May 17, 2022  5:29:42 PM</div></span>";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn forensic_html_tapback_added_sticker_missing_includes_timestamp() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(2007);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+        message.num_attachments = 1;
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "<span class=\"tapback\">Sticker from Sample Contact not found!<div class=\"tapback_time\">May 17, 2022  5:29:42 PM</div></span>";
 
         assert_eq!(actual, expected);
     }

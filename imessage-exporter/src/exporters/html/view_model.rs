@@ -233,6 +233,15 @@ pub(super) struct StickerSuffixVM {
 #[template(path = "tapback.html")]
 pub(super) struct TapbackVM<'a> {
     pub kind: TapbackKind<'a, Html>,
+    /// `""` for added tapbacks, `"removed "` for removed tapbacks in forensic
+    /// mode. Inserted between the kind label and the `by <who>` clause.
+    pub action_label: &'static str,
+    /// `""` for added tapbacks, `" tapback_removed"` for removed tapbacks
+    /// in forensic mode. Appended to the wrapper element's class list.
+    pub extra_class: &'static str,
+    /// Empty `Html` outside forensic mode, otherwise a pre-rendered
+    /// `<div class="tapback_time">...</div>` block carrying the timestamp.
+    pub time_html: Html,
 }
 
 #[derive(Template)]

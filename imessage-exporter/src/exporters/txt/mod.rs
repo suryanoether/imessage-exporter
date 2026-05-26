@@ -21,7 +21,9 @@ use crate::{
 };
 
 use imessage_database::{
-    message_types::{edited::EditedMessage, sticker::StickerDecoration},
+    message_types::{
+        edited::EditedMessage, sticker::StickerDecoration, variants::TapbackAction,
+    },
     tables::{
         attachment::Attachment,
         messages::{
@@ -164,13 +166,27 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
     }
 
     fn format_tapback(&self, msg: &Message) -> Result<String, RuntimeError> {
-        let Some(kind) = resolve_tapback(msg, self.config, |sticker| {
+        let Some(resolved) = resolve_tapback(msg, self.config, |sticker| {
             self.format_sticker(sticker, msg)
         })?
         else {
             return Ok(String::new());
         };
-        Ok(render_template(&TapbackVM { kind }))
+        let (action_label, time_suffix) = match &resolved.forensic {
+            None => ("", String::new()),
+            Some(f) => {
+                let action_label = match f.action {
+                    TapbackAction::Added => "",
+                    TapbackAction::Removed => "removed ",
+                };
+                (action_label, format!(" ({})", f.timestamp))
+            }
+        };
+        Ok(render_template(&TapbackVM {
+            kind: resolved.kind,
+            action_label,
+            time_suffix,
+        }))
     }
 
     fn format_announcement(&self, msg: &Message, out: &mut String) {
@@ -1245,6 +1261,151 @@ mod tests {
 
         let actual = exporter.format_tapback(&message).unwrap();
         let expected = "";
+
+        assert_eq!(actual, expected);
+    }
+
+    // MARK: Forensic mode tapback tests
+
+    #[test]
+    fn forensic_txt_tapback_added_reaction_includes_timestamp() {
+        let mut options = Options::fake_options(ExportType::Txt);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(2000);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "Loved by Sample Contact (May 17, 2022  5:29:42 PM)";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn forensic_txt_tapback_removed_reaction_renders_with_timestamp() {
+        let mut options = Options::fake_options(ExportType::Txt);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(3000);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "Loved removed by Sample Contact (May 17, 2022  5:29:42 PM)";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn forensic_txt_tapback_added_custom_emoji_includes_timestamp() {
+        let mut options = Options::fake_options(ExportType::Txt);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(2006);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+        message.associated_message_emoji = Some("☕️".to_string());
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "☕\u{fe0f} by Sample Contact (May 17, 2022  5:29:42 PM)";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn forensic_txt_tapback_removed_custom_emoji_renders() {
+        let mut options = Options::fake_options(ExportType::Txt);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(3006);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+        message.associated_message_emoji = Some("☕️".to_string());
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "☕\u{fe0f} removed by Sample Contact (May 17, 2022  5:29:42 PM)";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn forensic_txt_tapback_removed_sticker_renders_textually() {
+        let mut options = Options::fake_options(ExportType::Txt);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(3007);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+        message.num_attachments = 1;
+        message.rowid = 452567;
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "Sticker removed by Sample Contact (May 17, 2022  5:29:42 PM)";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn forensic_txt_tapback_added_sticker_missing_includes_timestamp() {
+        let mut options = Options::fake_options(ExportType::Txt);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(2007);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+        message.num_attachments = 1;
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "Sticker from Sample Contact not found! (May 17, 2022  5:29:42 PM)";
 
         assert_eq!(actual, expected);
     }

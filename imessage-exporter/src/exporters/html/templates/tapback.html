@@ -1,6 +1,6 @@
 {%- match kind -%}
-{%- when TapbackKind::Reaction { tapback, who } -%}<span class="tapback"><b>{{ tapback }}</b> by {{ who }}</span>
-{%- when TapbackKind::Sticker { payload, who } -%}{{ payload|safe }}<div class="sticker_tapback">&nbsp;by {{ who -}}
+{%- when TapbackKind::Reaction { tapback, who } -%}<span class="tapback{{ extra_class }}"><b>{{ tapback }}</b> {{ action_label }}by {{ who }}{{ time_html|safe }}</span>
+{%- when TapbackKind::Sticker { payload, who } -%}{{ payload|safe }}<div class="sticker_tapback">&nbsp;by {{ who }}{{ time_html|safe -}}
 </div>
-{%- when TapbackKind::StickerMissing { who } -%}<span class="tapback">Sticker from {{ who }} not found!</span>
+{%- when TapbackKind::StickerMissing { who } -%}<span class="tapback">Sticker from {{ who }} not found!{{ time_html|safe }}</span>
 {%- endmatch -%}
