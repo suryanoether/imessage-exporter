@@ -265,12 +265,30 @@ pub(super) struct AnnouncementInnerVM<'a> {
     pub kind: AnnouncementBody<'a>,
 }
 
+/// Quote header shown above a reply in forensic mode so the reader sees
+/// what's being responded to without the original being rendered twice.
+pub(super) struct ReplyingToVM {
+    pub sender: String,
+    /// Snippet text already collapsed and truncated; safe-by-default escaping
+    /// will run on render.
+    pub snippet: String,
+    /// The HTML anchor target (just the GUID; the template adds `#`).
+    pub anchor_target: String,
+}
+
 #[derive(Template)]
 #[template(path = "message.html")]
 pub(super) struct MessageVM<'a> {
     pub guid: &'a str,
-    /// Render `id="r-{guid}"` on the outer wrapper when this is a top-level reply.
-    pub anchor_id: bool,
+    /// Pre-computed value rendered as `id="{value}"` on the wrapper. `None`
+    /// for messages that need no anchor. In default mode this is set to
+    /// `r-{guid}` for top-level replies (existing behavior). In forensic
+    /// mode it is set to the bare `guid` for every top-level message so
+    /// replies can link back to their parents.
+    pub anchor_attr: Option<String>,
+    /// Set in forensic mode when this is a reply rendered at top level and
+    /// the parent was resolvable from the database.
+    pub replying_to: Option<ReplyingToVM>,
     /// True for `<div class="sent {service}">`, false for `<div class="received">`.
     pub is_from_me: bool,
     pub service: Service<'a>,

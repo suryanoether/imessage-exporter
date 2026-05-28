@@ -8,6 +8,39 @@ use crate::{
     },
 };
 
+/// Maximum character length of a reply-context snippet before it gets
+/// truncated. Keep aligned with how much fits on one rendered line.
+const REPLY_SNIPPET_MAX_CHARS: usize = 80;
+
+/// Build a short, single-line preview of the message being replied to. The
+/// caller is responsible for HTML-escaping the result.
+pub(crate) fn build_reply_snippet(parent: &Message) -> String {
+    let raw = parent.text.as_deref().unwrap_or("").trim();
+    if raw.is_empty() {
+        return non_text_placeholder(parent).to_string();
+    }
+    // Collapse internal whitespace (multi-line, tabs) into single spaces so
+    // the preview stays one visual line.
+    let collapsed: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= REPLY_SNIPPET_MAX_CHARS {
+        return collapsed;
+    }
+    let mut truncated: String = collapsed
+        .chars()
+        .take(REPLY_SNIPPET_MAX_CHARS)
+        .collect();
+    truncated.push('…');
+    truncated
+}
+
+fn non_text_placeholder(parent: &Message) -> &'static str {
+    if parent.num_attachments > 0 {
+        "[attachment]"
+    } else {
+        "[no preview]"
+    }
+}
+
 /// One reply, as fed to the format's `replies` template. `body` is already a
 /// fully-rendered, format-safe payload; its concrete type `S` is chosen by
 /// the calling format. `guid` is exposed for templates that need it (e.g. as
@@ -89,5 +122,59 @@ where
         Ok(None)
     } else {
         Ok(Some(rendered))
+    }
+}
+
+#[cfg(test)]
+mod snippet_tests {
+    use super::{REPLY_SNIPPET_MAX_CHARS, build_reply_snippet};
+    use crate::Config;
+    use imessage_database::tables::messages::Message;
+
+    fn parent_with(text: Option<&str>, attachments: i32) -> Message {
+        let mut m = Config::fake_message();
+        m.text = text.map(str::to_string);
+        m.num_attachments = attachments;
+        m
+    }
+
+    #[test]
+    fn snippet_returns_short_text_unchanged() {
+        let parent = parent_with(Some("hi there"), 0);
+        assert_eq!(build_reply_snippet(&parent), "hi there");
+    }
+
+    #[test]
+    fn snippet_collapses_internal_whitespace() {
+        let parent = parent_with(Some("line one\nline\ttwo   end"), 0);
+        assert_eq!(build_reply_snippet(&parent), "line one line two end");
+    }
+
+    #[test]
+    fn snippet_truncates_long_text_with_ellipsis() {
+        let parent = parent_with(Some(&"a".repeat(REPLY_SNIPPET_MAX_CHARS + 25)), 0);
+        let out = build_reply_snippet(&parent);
+        assert_eq!(out.chars().count(), REPLY_SNIPPET_MAX_CHARS + 1);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn snippet_keeps_boundary_length_intact() {
+        let parent = parent_with(Some(&"a".repeat(REPLY_SNIPPET_MAX_CHARS)), 0);
+        let out = build_reply_snippet(&parent);
+        assert_eq!(out.chars().count(), REPLY_SNIPPET_MAX_CHARS);
+        assert!(!out.ends_with('…'));
+    }
+
+    #[test]
+    fn snippet_falls_back_to_attachment_placeholder() {
+        let parent = parent_with(None, 1);
+        assert_eq!(build_reply_snippet(&parent), "[attachment]");
+    }
+
+    #[test]
+    fn snippet_falls_back_to_no_preview_when_empty_and_no_attachment() {
+        let parent = parent_with(Some("   "), 0);
+        assert_eq!(build_reply_snippet(&parent), "[no preview]");
     }
 }

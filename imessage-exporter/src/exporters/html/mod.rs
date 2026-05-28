@@ -23,7 +23,7 @@ use crate::{
             message::MessageContext,
             part::dispatch_part_body,
             render::{render_template, render_template_into},
-            reply::{build_replies, build_tapbacks},
+            reply::{build_replies, build_reply_snippet, build_tapbacks},
             tapback::resolve_tapback,
             time::message_time,
         },
@@ -54,7 +54,8 @@ mod view_model;
 use safe::Html;
 use view_model::{
     AnnouncementInnerVM, AttachmentVM, AttachmentVariant, EditedRow, EditedVM, MessagePartVM,
-    MessageVM, PartBody, RepliesVM, ReplyAnchorKind, StickerSuffixVM, TapbackVM, TapbacksVM,
+    MessageVM, PartBody, RepliesVM, ReplyAnchorKind, ReplyingToVM, StickerSuffixVM, TapbackVM,
+    TapbacksVM,
 };
 
 // MARK: HTML
@@ -367,6 +368,7 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
         out: &mut String,
     ) -> Result<(), RuntimeError> {
         let is_reply = matches!(context, RenderContext::Reply);
+        let forensic = self.config.options.forensic;
         let mut ctx = MessageContext::resolve(message, self.config.data_source.db())?;
         let mut attachment_index: usize = 0;
 
@@ -381,23 +383,37 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
                 &mut attachment_index,
             );
 
-            parts.push(MessagePartVM {
-                body,
-                expressive: ctx.expressive,
-                tapbacks: build_tapbacks(self, message, idx, Html::trust)?
-                    .map(|tapbacks| TapbacksVM { tapbacks }),
-                replies: build_replies(
+            // In forensic mode every message renders at its own chronological
+            // position; replies are not inlined under their parent, which is
+            // what produces the duplication.
+            let replies = if forensic {
+                None
+            } else {
+                build_replies(
                     self,
                     ctx.replies_map.get_mut(&idx),
                     Self::BUFFER_CAPACITY,
                     Html::trust,
                 )?
-                .map(|replies| RepliesVM { replies }),
+                .map(|replies| RepliesVM { replies })
+            };
+
+            parts.push(MessagePartVM {
+                body,
+                expressive: ctx.expressive,
+                tapbacks: build_tapbacks(self, message, idx, Html::trust)?
+                    .map(|tapbacks| TapbacksVM { tapbacks }),
+                replies,
             });
         }
 
         let (date, read_after) = self.get_time(message);
-        let reply_anchor = if message.is_reply() {
+
+        // Forensic mode replaces the original anchor/trailing-context pair
+        // with `replying_to` + a stable per-message anchor (`id="{guid}"`),
+        // so dropping the legacy anchor/context fields keeps the markup
+        // from carrying two competing reply affordances.
+        let reply_anchor = if !forensic && message.is_reply() {
             Some(if is_reply {
                 ReplyAnchorKind::InThread
             } else {
@@ -406,10 +422,25 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
         } else {
             None
         };
+        let trailing_reply_context = !forensic && message.is_reply() && !is_reply;
+        let anchor_attr = if forensic && !is_reply {
+            Some(message.guid.clone())
+        } else if !forensic && message.is_reply() && !is_reply {
+            Some(format!("r-{}", message.guid))
+        } else {
+            None
+        };
+
+        let replying_to = if forensic && message.is_reply() && !is_reply {
+            self.resolve_replying_to(message)
+        } else {
+            None
+        };
 
         let vm = MessageVM {
             guid: &message.guid,
-            anchor_id: message.is_reply() && !is_reply,
+            anchor_attr,
+            replying_to,
             is_from_me: message.is_from_me(),
             service: message.service(),
             date,
@@ -429,7 +460,7 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
                 .shared_location_kind()
                 .map(|kind| Html::trust(self.format_shared_location(kind))),
             parts,
-            trailing_reply_context: message.is_reply() && !is_reply,
+            trailing_reply_context,
         };
         render_template_into(&vm, out);
         Ok(())
@@ -520,6 +551,29 @@ impl PartBodyBuilder for HTML<'_> {
 
 // MARK: Impl
 impl HTML<'_> {
+    /// Resolve the message a reply is responding to and build the
+    /// view-model fragment shown above the reply in forensic mode. Returns
+    /// `None` if the parent isn't in the database (filtered out, or the
+    /// reply is an orphan) so the caller can render the reply without a
+    /// quote header rather than dropping it.
+    fn resolve_replying_to(&self, reply: &Message) -> Option<ReplyingToVM> {
+        let orig_guid = reply.thread_originator_guid.as_deref()?;
+        let parent = Message::from_guid(orig_guid, self.config.data_source.db()).ok()?;
+        let sender = self
+            .config
+            .who(
+                parent.handle_id,
+                parent.is_from_me(),
+                &parent.destination_caller_id,
+            )
+            .to_string();
+        Some(ReplyingToVM {
+            sender,
+            snippet: build_reply_snippet(&parent),
+            anchor_target: parent.guid,
+        })
+    }
+
     fn get_time(&self, message: &Message) -> (String, String) {
         message_time(self.config, message)
     }
@@ -1016,6 +1070,134 @@ mod tests {
         let expected = "<div class=\"message\">\n    <div class=\"sent iMessage\">\n        <p>\n            <span class=\"timestamp\">\n                <a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=PLAIN-GUID\">May 17, 2022  5:29:42 PM</a>\n                \n            </span>\n            \n            <span class=\"sender\">Me</span>\n        </p>\n        \n        \n        \n        \n        \n        <hr>\n<div class=\"message_part\">\n    <span class=\"bubble\">hello</span>\n    </div>\n\n        \n        \n    </div>\n</div>\n";
 
         assert_eq!(actual, expected);
+    }
+
+    // MARK: Forensic mode reply tests
+
+    #[test]
+    fn forensic_html_reply_top_level_with_known_parent_renders_quote_header() {
+        // Test DB ships with a real message at this GUID; we use it as the
+        // synthetic reply's parent so resolve_replying_to can populate the
+        // quote header.
+        const PARENT_GUID: &str = "0355C6E1-D0C8-4212-AA87-DD8AE4FD1203";
+
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.guid = "REPLY-GUID".to_string();
+        message.text = Some("got it".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+        message.thread_originator_guid = Some(PARENT_GUID.to_string());
+        message.thread_originator_part = Some("0:0:0".to_string());
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+
+        // Forensic mode rules we assert:
+        //   - id is the bare guid (no `r-` prefix)
+        //   - replying_to div exists with an anchor pointing at the parent
+        //   - trailing_reply_context stub is gone
+        //   - reply_anchor (the ⇱ icon) is gone (no inline-thread view to link to)
+        assert!(
+            actual.contains("id=\"REPLY-GUID\""),
+            "expected forensic top-level id=guid, got: {actual}",
+        );
+        assert!(
+            actual.contains(&format!("<div class=\"replying_to\"><a href=\"#{PARENT_GUID}\">↪ ")),
+            "expected replying_to anchor to parent, got: {actual}",
+        );
+        assert!(
+            !actual.contains("This message responded to an earlier message"),
+            "trailing_reply_context stub should be suppressed in forensic mode, got: {actual}",
+        );
+        assert!(
+            !actual.contains("reply_anchor"),
+            "reply_anchor link should be suppressed in forensic mode, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn forensic_html_reply_top_level_with_missing_parent_renders_without_quote_header() {
+        // GUID is not in the fixture db; resolve_replying_to returns None
+        // and the reply must still render (no quote header, no crash).
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.guid = "ORPHAN-REPLY-GUID".to_string();
+        message.text = Some("got it".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+        message.thread_originator_guid = Some("MISSING-ORIG-GUID".to_string());
+        message.thread_originator_part = Some("0:0:0".to_string());
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+
+        assert!(
+            actual.contains("id=\"ORPHAN-REPLY-GUID\""),
+            "expected forensic top-level id=guid even for orphans, got: {actual}",
+        );
+        assert!(
+            !actual.contains("replying_to"),
+            "no replying_to header when parent is missing, got: {actual}",
+        );
+        assert!(
+            actual.contains("got it"),
+            "reply body must still render when parent missing, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn forensic_html_non_reply_top_level_gets_bare_guid_anchor() {
+        // Every top-level message in forensic mode needs an anchor so
+        // future replies can link back to it.
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.guid = "FORENSIC-PLAIN-GUID".to_string();
+        message.text = Some("hi".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+
+        assert!(
+            actual.contains("id=\"FORENSIC-PLAIN-GUID\""),
+            "expected forensic top-level id=guid on non-reply, got: {actual}",
+        );
+        assert!(
+            !actual.contains("replying_to"),
+            "non-reply must not render a replying_to header, got: {actual}",
+        );
     }
 
     #[test]

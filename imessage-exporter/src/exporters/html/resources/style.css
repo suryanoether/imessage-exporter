@@ -253,6 +253,23 @@ div.tapback {
     align-items: center;
 }
 
+.replying_to {
+    border-left: 3px solid var(--muted-text);
+    padding: 0.15em 0.6em;
+    margin: 0.2em 0 0.4em 0;
+    font-size: 0.85em;
+    color: var(--muted-text);
+}
+
+.replying_to a {
+    text-decoration: none;
+    color: inherit;
+}
+
+.replying_to a:hover {
+    text-decoration: underline;
+}
+
 .tapback_time {
     font-size: 0.75em;
     color: var(--muted-text);

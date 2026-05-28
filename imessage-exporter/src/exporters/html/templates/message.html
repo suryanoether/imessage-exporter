@@ -1,4 +1,4 @@
-<div class="message" {%- if anchor_id %} id="r-{{ guid }}" {%- endif %}>
+<div class="message" {%- if let Some(id) = anchor_attr %} id="{{ id }}" {%- endif %}>
     <div class="{% if is_from_me %}sent {{ service }}{% else %}received{% endif %}">
         <p>
             <span class="timestamp">
@@ -14,7 +14,8 @@
             {% endmatch %}
             {% endif %}
             <span class="sender">{{ sender }}</span>
-        </p>
+        </p>{% if let Some(rt) = replying_to %}
+        <div class="replying_to"><a href="#{{ rt.anchor_target }}">↪ {{ rt.sender }}: &ldquo;{{ rt.snippet }}&rdquo;</a></div>{% endif %}
         {% if is_deleted %}
         <span class="deleted">This message was deleted from the conversation!</span>
         {% endif %}
