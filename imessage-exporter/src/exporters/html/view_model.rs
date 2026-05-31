@@ -265,6 +265,24 @@ pub(super) struct AnnouncementInnerVM<'a> {
     pub kind: AnnouncementBody<'a>,
 }
 
+/// Per-message metadata strip rendered at the bottom of every bubble in
+/// forensic mode. Captures the GUID, delivery / read timestamps, edit
+/// indicator, deletion indicator, and chat id so each bubble is verifiable
+/// against the source database.
+///
+/// Fields are emitted only when non-empty (e.g. `delivered` is `None` for
+/// rows where `date_delivered == 0`), keeping the strip readable.
+pub(super) struct ForensicMetaVM {
+    /// Truncated GUID for display (e.g. "ABC12345…"). Full GUID lives on
+    /// the outer wrapper as the anchor id.
+    pub guid_short: String,
+    pub delivered: Option<String>,
+    pub read: Option<String>,
+    pub edited: bool,
+    pub deleted: bool,
+    pub chat_id: Option<i32>,
+}
+
 /// Quote header shown above a reply in forensic mode so the reader sees
 /// what's being responded to without the original being rendered twice.
 pub(super) struct ReplyingToVM {
@@ -322,6 +340,9 @@ pub(super) struct MessageVM<'a> {
     /// Set in forensic mode when this is a reply rendered at top level and
     /// the parent was resolvable from the database.
     pub replying_to: Option<ReplyingToVM>,
+    /// Forensic metadata strip rendered at the bottom of the bubble. Only
+    /// populated in `--forensic` mode.
+    pub forensic_meta: Option<ForensicMetaVM>,
     /// True for `<div class="sent {service}">`, false for `<div class="received">`.
     pub is_from_me: bool,
     pub service: Service<'a>,

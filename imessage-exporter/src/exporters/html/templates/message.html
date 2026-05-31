@@ -33,7 +33,8 @@
         {% endfor %}
         {% if trailing_reply_context %}
         <span class="reply_context">This message responded to an earlier message.</span>
-        {% endif %}
+        {% endif %}{% if let Some(fm) = forensic_meta %}
+        <p class="forensic_meta"><span class="forensic_meta_guid">guid: {{ fm.guid_short }}</span>{% if let Some(d) = fm.delivered %} <span class="forensic_meta_sep">·</span> <span>delivered: {{ d }}</span>{% endif %}{% if let Some(r) = fm.read %} <span class="forensic_meta_sep">·</span> <span>read: {{ r }}</span>{% endif %}{% if fm.edited %} <span class="forensic_meta_sep">·</span> <span class="forensic_meta_flag">edited</span>{% endif %}{% if fm.deleted %} <span class="forensic_meta_sep">·</span> <span class="forensic_meta_flag">deleted</span>{% endif %}{% if let Some(c) = fm.chat_id %} <span class="forensic_meta_sep">·</span> <span>chat: {{ c }}</span>{% endif %}</p>{% endif %}
     </div>
 </div>
 {# trailing newline; askama strips one #}

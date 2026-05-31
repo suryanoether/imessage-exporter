@@ -25,7 +25,7 @@ use crate::{
             render::{render_template, render_template_into},
             reply::{build_replies, build_reply_snippet, build_tapbacks},
             tapback::resolve_tapback,
-            time::{format_message_date, message_time},
+            time::{format_message_date, format_timestamp, message_time},
         },
     },
 };
@@ -53,9 +53,9 @@ mod view_model;
 
 use safe::Html;
 use view_model::{
-    AnnouncementInnerVM, AttachmentVM, AttachmentVariant, EditedRow, EditedVM, InReactionToVM,
-    MessagePartVM, MessageVM, PartBody, RepliesVM, ReplyAnchorKind, ReplyingToVM, StickerSuffixVM,
-    TapbackBubbleVM, TapbackVM, TapbacksVM,
+    AnnouncementInnerVM, AttachmentVM, AttachmentVariant, EditedRow, EditedVM, ForensicMetaVM,
+    InReactionToVM, MessagePartVM, MessageVM, PartBody, RepliesVM, ReplyAnchorKind, ReplyingToVM,
+    StickerSuffixVM, TapbackBubbleVM, TapbackVM, TapbacksVM,
 };
 
 // MARK: HTML
@@ -482,6 +482,12 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
             None
         };
 
+        let forensic_meta = if forensic {
+            Some(self.build_forensic_meta(message))
+        } else {
+            None
+        };
+
         let vm = MessageVM {
             guid: &message.guid,
             anchor_attr,
@@ -506,6 +512,7 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
                 .map(|kind| Html::trust(self.format_shared_location(kind))),
             parts,
             trailing_reply_context,
+            forensic_meta,
         };
         render_template_into(&vm, out);
         Ok(())
@@ -630,6 +637,26 @@ impl HTML<'_> {
             snippet: build_reply_snippet(&parent),
             anchor_target: parent.guid,
         })
+    }
+
+    /// Build the per-message forensic metadata strip rendered at the
+    /// bottom of every bubble in `--forensic` mode. Timestamps are emitted
+    /// only when the underlying field is non-zero so untracked events
+    /// (e.g. a never-read message) leave the strip cleaner rather than
+    /// rendering an epoch-of-2001 placeholder.
+    fn build_forensic_meta(&self, message: &Message) -> ForensicMetaVM {
+        let delivered = (message.date_delivered != 0)
+            .then(|| format_timestamp(message.date_delivered, self.config.offset));
+        let read = (message.date_read != 0)
+            .then(|| format_timestamp(message.date_read, self.config.offset));
+        ForensicMetaVM {
+            guid_short: short_guid(&message.guid),
+            delivered,
+            read,
+            edited: message.is_edited(),
+            deleted: message.is_deleted(),
+            chat_id: message.chat_id,
+        }
     }
 
     /// Resolve the message that a tapback was applied to so the bubble can
@@ -1340,6 +1367,138 @@ mod tests {
         assert!(
             !actual.contains("class=\"tapbacks\""),
             "expected no inline tapbacks block in forensic mode, got: {actual}",
+        );
+    }
+
+    // MARK: Forensic mode per-message metadata strip
+
+    #[test]
+    fn forensic_html_message_renders_forensic_meta_with_all_fields() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.date_delivered = 674526582885055488;
+        message.date_read = 674530231992568192; // 1h+ later
+        message.date_edited = 674530231992568192; // marks is_edited()
+        message.guid = "META-FULL-GUID-1234567890".to_string();
+        message.text = Some("hi".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(42);
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+
+        // The strip must include every captured field
+        assert!(
+            actual.contains("class=\"forensic_meta\""),
+            "expected forensic_meta strip in output, got: {actual}",
+        );
+        assert!(
+            actual.contains("guid: META-FUL"),
+            "expected truncated guid in strip, got: {actual}",
+        );
+        assert!(
+            actual.contains("delivered: May 17, 2022  5:29:42 PM"),
+            "expected delivered timestamp, got: {actual}",
+        );
+        assert!(
+            actual.contains("read: May 17, 2022  6:30:31 PM"),
+            "expected read timestamp, got: {actual}",
+        );
+        assert!(
+            actual.contains("edited"),
+            "expected edited flag, got: {actual}",
+        );
+        assert!(
+            actual.contains("chat: 42"),
+            "expected chat id, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn forensic_html_message_omits_zero_delivery_and_read_fields() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        // date_delivered and date_read left at 0 (default)
+        message.guid = "META-MIN-GUID-12345".to_string();
+        message.text = Some("hi".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+
+        assert!(
+            actual.contains("class=\"forensic_meta\""),
+            "expected forensic_meta strip to render even when timestamps are zero, got: {actual}",
+        );
+        assert!(
+            actual.contains("guid: META-MIN"),
+            "expected truncated guid, got: {actual}",
+        );
+        assert!(
+            !actual.contains("delivered:"),
+            "must NOT render delivered when date_delivered==0, got: {actual}",
+        );
+        assert!(
+            !actual.contains("read:"),
+            "must NOT render read when date_read==0, got: {actual}",
+        );
+        assert!(
+            !actual.contains(">edited<"),
+            "must NOT render edited flag for un-edited messages, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn default_mode_message_renders_no_forensic_meta() {
+        let options = Options::fake_options(ExportType::Html);
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.date_delivered = 674526582885055488;
+        message.date_read = 674530231992568192;
+        message.guid = "DEFAULT-MODE-GUID".to_string();
+        message.text = Some("hi".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+
+        assert!(
+            !actual.contains("forensic_meta"),
+            "default mode must not render the forensic metadata strip, got: {actual}",
         );
     }
 

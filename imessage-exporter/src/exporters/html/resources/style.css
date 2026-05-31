@@ -319,6 +319,27 @@ div.tapback {
     text-decoration: line-through;
 }
 
+.forensic_meta {
+    margin: 0.3em 0 0 0;
+    padding-top: 0.25em;
+    border-top: 1px dotted var(--muted-text);
+    font-size: 0.7em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--muted-text);
+    word-break: break-all;
+}
+
+.forensic_meta_sep {
+    opacity: 0.6;
+    padding: 0 0.15em;
+}
+
+.forensic_meta_flag {
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
 .tapback_time {
     font-size: 0.75em;
     color: var(--muted-text);
