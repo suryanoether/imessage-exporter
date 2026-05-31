@@ -4646,3 +4646,172 @@ mod edited_tests {
         assert_eq!(actual, expected);
     }
 }
+
+// MARK: Forensic integration tests
+//
+// These tests run the full `run_export` pipeline against a checked-in
+// fixture database (`forensic_fixture.db`) containing deliberate scenarios:
+// added/removed tapbacks, custom-emoji tapback, orphan tapback, reply,
+// edited message. They assert on the actual rendered HTML so changes that
+// break end-to-end behavior (the snippet-bug class) get caught in CI.
+#[cfg(test)]
+mod forensic_integration_tests {
+    use std::{env::current_dir, path::PathBuf};
+
+    use crate::{
+        Config, HTML, Options,
+        app::export_type::ExportType,
+        exporters::shared::driver::run_export,
+    };
+
+    fn fixture_db_path() -> PathBuf {
+        current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/db/forensic_fixture.db")
+    }
+
+    fn export_dir(test_name: &str) -> PathBuf {
+        // Per-test directory so parallel-running tests can't clash.
+        std::env::temp_dir().join(format!("forensic_integration_{test_name}"))
+    }
+
+    fn export_to_string(test_name: &str, forensic: bool) -> String {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.db_path = fixture_db_path();
+        options.forensic = forensic;
+        let dir = export_dir(test_name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        options.export_path = dir.clone();
+
+        let config = Config::fake_app(options);
+        let mut writer = HTML::new(&config).unwrap();
+        run_export(&mut writer).unwrap();
+
+        let html = std::fs::read_to_string(dir.join("orphaned.html"))
+            .expect("orphaned.html should exist after run_export");
+        let _ = std::fs::remove_dir_all(&dir);
+        html
+    }
+
+    #[test]
+    fn forensic_full_pipeline_renders_meta_strip_on_messages() {
+        let html = export_to_string("meta_strip", true);
+        assert!(
+            html.contains("class=\"forensic_meta\""),
+            "expected forensic_meta strip in output",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_renders_reply_with_parent_text_snippet() {
+        // Regression: if resolve_replying_to skips apply_body, this assertion
+        // fails because the snippet falls back to "[attachment]".
+        let html = export_to_string("reply_snippet", true);
+        assert!(
+            html.contains("class=\"replying_to\""),
+            "expected replying_to quote header",
+        );
+        assert!(
+            html.contains("eat as quick as possible"),
+            "expected parent's real text in the reply snippet, got placeholder?",
+        );
+        assert!(
+            html.contains("href=\"#0355C6E1-D0C8-4212-AA87-DD8AE4FD1203\""),
+            "expected anchor link to parent guid",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_renders_added_tapback_bubble_with_in_reaction_to() {
+        let html = export_to_string("added_tapback_bubble", true);
+        assert!(
+            html.contains("id=\"F0R3N51C-0002-LOVE-ADDD-EDFFFFFFFFFF\""),
+            "expected added-tapback bubble anchor",
+        );
+        // Same snippet regression check applies to in_reaction_to.
+        assert!(
+            html.contains("eat as quick as possible"),
+            "expected target's real text in in_reaction_to snippet",
+        );
+        assert!(
+            html.contains("Added by"),
+            "expected Added phrasing in tapback summary",
+        );
+        assert!(
+            html.contains(">Loved<"),
+            "expected Loved kind in tapback summary",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_renders_removed_tapback_bubble_with_removed_class() {
+        let html = export_to_string("removed_tapback_bubble", true);
+        assert!(
+            html.contains("tapback_bubble_removed"),
+            "expected tapback_bubble_removed class for removed tapback",
+        );
+        assert!(
+            html.contains("id=\"F0R3N51C-0003-LIKE-REMD-EDFFFFFFFFFF\""),
+            "expected removed-tapback bubble anchor",
+        );
+        assert!(
+            html.contains("Removed by"),
+            "expected Removed phrasing in tapback summary",
+        );
+        assert!(
+            html.contains(">Liked<"),
+            "expected Liked kind for removed tapback",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_renders_custom_emoji_tapback() {
+        let html = export_to_string("custom_emoji_tapback", true);
+        assert!(
+            html.contains("id=\"F0R3N51C-0004-EMJI-CFFE-EDFFFFFFFFFF\""),
+            "expected custom-emoji-tapback bubble anchor",
+        );
+        // Coffee + variation selector: U+2615 U+FE0F.
+        assert!(
+            html.contains("\u{2615}\u{fe0f}"),
+            "expected coffee emoji in custom-emoji tapback bubble",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_renders_orphan_tapback_without_in_reaction_to() {
+        let html = export_to_string("orphan_tapback", true);
+        assert!(
+            html.contains("id=\"F0R3N51C-0005-LOVE-ORPH-EDFFFFFFFFFF\""),
+            "expected orphan-tapback bubble to render even when target is missing",
+        );
+        // Scope the in_reaction_to check to the orphan's bubble only — other
+        // tapbacks in the same export legitimately have headers.
+        let needle = "id=\"F0R3N51C-0005-LOVE-ORPH-EDFFFFFFFFFF\"";
+        let start = html.find(needle).expect("orphan bubble anchor present");
+        let tail = &html[start..];
+        let bubble_end = tail.find("</div></div>").unwrap_or(tail.len());
+        let bubble = &tail[..bubble_end];
+        assert!(
+            !bubble.contains("in_reaction_to"),
+            "orphan tapback bubble must omit in_reaction_to header, got: {bubble}",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_renders_edited_flag_on_edited_message() {
+        let html = export_to_string("edited_flag", true);
+        let needle = "id=\"F0R3N51C-0006-EDIT-EDIT-EDFFFFFFFFFF\"";
+        let start = html.find(needle).expect("edited message anchor not found");
+        let tail = &html[start..];
+        let bubble_end = tail.find("</div>\n</div>").unwrap_or(tail.len());
+        let bubble = &tail[..bubble_end];
+        assert!(
+            bubble.contains(">edited<"),
+            "expected `edited` flag inside the forensic_meta strip of the edited message, got: {bubble}",
+        );
+    }
+}
