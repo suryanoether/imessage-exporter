@@ -25,7 +25,7 @@ use crate::{
             render::{render_template, render_template_into},
             reply::{build_replies, build_reply_snippet, build_tapbacks},
             tapback::resolve_tapback,
-            time::{format_message_date, format_timestamp, message_time},
+            time::{format_message_date_with_tz, format_timestamp_with_tz, message_time},
         },
     },
 };
@@ -265,7 +265,7 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
             .config
             .who(msg.handle_id, msg.is_from_me(), &msg.destination_caller_id)
             .to_string();
-        let timestamp = format_message_date(msg, self.config.offset);
+        let timestamp = format_message_date_with_tz(msg, self.config.offset);
         let in_reaction_to = self.resolve_in_reaction_to(msg);
         let guid_short = short_guid(&msg.guid);
         let service = format!("{}", msg.service());
@@ -651,9 +651,9 @@ impl HTML<'_> {
     /// rendering an epoch-of-2001 placeholder.
     fn build_forensic_meta(&self, message: &Message) -> ForensicMetaVM {
         let delivered = (message.date_delivered != 0)
-            .then(|| format_timestamp(message.date_delivered, self.config.offset));
+            .then(|| format_timestamp_with_tz(message.date_delivered, self.config.offset));
         let read = (message.date_read != 0)
-            .then(|| format_timestamp(message.date_read, self.config.offset));
+            .then(|| format_timestamp_with_tz(message.date_read, self.config.offset));
         ForensicMetaVM {
             guid_short: short_guid(&message.guid),
             delivered,
@@ -4702,6 +4702,38 @@ mod forensic_integration_tests {
         assert!(
             html.contains("class=\"forensic_meta\""),
             "expected forensic_meta strip in output",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_timestamps_carry_tz_abbreviation() {
+        // The fixture dates are in Feb 2025 (PST window) and the test
+        // suite runs under TZ=America/Los_Angeles. Any timestamp in the
+        // forensic_meta strip must include the resolved abbreviation so
+        // alibi-grade reading is possible.
+        let html = export_to_string("tz_abbrev", true);
+        assert!(
+            html.contains(" PST") || html.contains(" PDT"),
+            "expected PST/PDT in forensic timestamps; got no TZ abbreviation",
+        );
+        // Negative: the numeric-offset fallback should NOT be used when
+        // we have a named tz. Catches the iana_time_zone-returned-UTC
+        // regression we just fixed.
+        assert!(
+            !html.contains(" -08:00") && !html.contains(" -0800"),
+            "TZ should resolve to named abbreviation, not numeric offset",
+        );
+    }
+
+    #[test]
+    fn default_mode_timestamps_do_not_carry_tz_abbreviation() {
+        // Backward-compat: default exports must keep the bare timestamp
+        // format so existing golden-string tests stay green and outside
+        // users don't see new tokens in their output.
+        let html = export_to_string("default_no_tz", false);
+        assert!(
+            !html.contains(" PST") && !html.contains(" PDT") && !html.contains(" UTC"),
+            "default mode must not append a TZ abbreviation to timestamps",
         );
     }
 

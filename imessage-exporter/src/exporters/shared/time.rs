@@ -1,6 +1,6 @@
 use imessage_database::{
     tables::messages::Message,
-    util::dates::{format, get_local_time},
+    util::dates::{format, format_with_tz, get_local_time},
 };
 
 use crate::app::runtime::Config;
@@ -15,6 +15,16 @@ pub fn format_message_date(message: &Message, offset: i64) -> String {
     }
 }
 
+/// Forensic-mode counterpart to [`format_message_date`] that includes the
+/// timezone abbreviation. Default exports keep using the bare formatter
+/// to preserve backward-compatible output.
+pub fn format_message_date_with_tz(message: &Message, offset: i64) -> String {
+    match message.date(offset) {
+        Ok(d) => format_with_tz(&d),
+        Err(why) => why.to_string(),
+    }
+}
+
 /// Same as [`format_message_date`] but for a raw `i64` iMessage timestamp
 /// (used by edit-history events, which carry their own `date` field rather
 /// than a `Message`).
@@ -25,11 +35,24 @@ pub fn format_timestamp(timestamp: i64, offset: i64) -> String {
     }
 }
 
+/// Forensic-mode counterpart to [`format_timestamp`] that includes the
+/// timezone abbreviation.
+pub fn format_timestamp_with_tz(timestamp: i64, offset: i64) -> String {
+    match get_local_time(timestamp, offset) {
+        Ok(d) => format_with_tz(&d),
+        Err(why) => why.to_string(),
+    }
+}
+
 /// Compute the formatted timestamp and read receipt for a message.
 /// Returns `(formatted_date, read_receipt)` where `read_receipt` is
 /// empty if there is no read receipt data.
 pub fn message_time(config: &Config, message: &Message) -> (String, String) {
-    let date = format_message_date(message, config.offset);
+    let date = if config.options.forensic {
+        format_message_date_with_tz(message, config.offset)
+    } else {
+        format_message_date(message, config.offset)
+    };
     let mut read_receipt = String::new();
     if let Some(time) = message.time_until_read(config.offset)
         && !time.is_empty()

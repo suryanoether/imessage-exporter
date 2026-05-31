@@ -11,6 +11,8 @@ version = "0.0.0"
 
 [dependencies]
 chrono = "=0.4.44"
+chrono-tz = "=0.10.4"
+iana-time-zone = "=0.1.64"
 plist = "=1.8.0"
 rusqlite = { version = "=0.39.0", features = ["blob", "bundled"] }
 sha1 = "=0.10.6"

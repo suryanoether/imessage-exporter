@@ -84,6 +84,51 @@ pub fn format(date: &DateTime<Local>) -> String {
     DateTime::format(date, "%b %d, %Y %l:%M:%S %p").to_string()
 }
 
+/// Like [`format`] but appends the timezone abbreviation (`PST`, `PDT`,
+/// `UTC`, etc.) so the timestamp is unambiguous in `--forensic` exports.
+///
+/// `chrono::Local` itself only carries a numeric offset (its `%Z` falls
+/// back to e.g. `-08:00`), so we look up the system's IANA tz name via
+/// [`iana_time_zone`] and convert through [`chrono_tz`] to get a true
+/// named zone whose `%Z` resolves to the abbreviation. If the system tz
+/// can't be detected or doesn't match a known IANA name, the numeric
+/// offset is used as a safe fallback — still legally unambiguous, just
+/// less colloquial.
+///
+/// # Example:
+///
+/// ```
+/// use chrono::offset::Local;
+/// use imessage_database::util::dates::format_with_tz;
+///
+/// let date = format_with_tz(&Local::now());
+/// println!("{date}");
+/// ```
+#[must_use]
+pub fn format_with_tz(date: &DateTime<Local>) -> String {
+    // Resolve a named IANA zone so chrono can render the proper
+    // abbreviation. Source order:
+    //   1. `TZ` env var if it parses as an IANA name. This is the same
+    //      knob `chrono::Local` honors, so taking it first keeps the
+    //      abbreviation in sync with the offset chrono already used.
+    //   2. `iana_time_zone::get_timezone()` reads `/etc/localtime` on
+    //      Unix and the system API on macOS/Windows. Picks up the
+    //      "real" system tz when `TZ` is unset.
+    let tz_name = std::env::var("TZ").ok().or_else(|| iana_time_zone::get_timezone().ok());
+    if let Some(name) = tz_name
+        && let Ok(tz) = name.trim_start_matches(':').parse::<chrono_tz::Tz>()
+    {
+        return date
+            .with_timezone(&tz)
+            .format("%b %d, %Y %l:%M:%S %p %Z")
+            .to_string();
+    }
+    // Fallback: chrono's `Local` knows its offset (e.g. `-08:00`) even
+    // when the IANA name resolution fails. The offset is still
+    // forensically defensible — just not "PST"-shaped.
+    date.format("%b %d, %Y %l:%M:%S %p %z").to_string()
+}
+
 /// Generate a readable diff from two local timestamps.
 ///
 /// # Example:
