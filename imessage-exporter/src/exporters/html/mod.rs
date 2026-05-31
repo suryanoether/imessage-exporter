@@ -18,7 +18,7 @@ use crate::{
             announcement::{AnnouncementBody, resolve_announcement},
             attachment::prepare_attachment,
             balloon::dispatch_app_balloon,
-            driver::{ExportState, MessageWriter},
+            driver::{ExportState, MessageWriter, apply_body},
             edited::{EditDiff, normalize_edited},
             message::MessageContext,
             part::dispatch_part_body,
@@ -623,7 +623,12 @@ impl HTML<'_> {
     /// quote header rather than dropping it.
     fn resolve_replying_to(&self, reply: &Message) -> Option<ReplyingToVM> {
         let orig_guid = reply.thread_originator_guid.as_deref()?;
-        let parent = Message::from_guid(orig_guid, self.config.data_source.db()).ok()?;
+        let mut parent = Message::from_guid(orig_guid, self.config.data_source.db()).ok()?;
+        // iMessage typically stores message text in the attributedBody blob
+        // (not the `text` column) and our snippet helper reads `text`
+        // directly. Without this call, every snippet falls back to the
+        // "[attachment]"/"[no preview]" placeholder.
+        apply_body(&mut parent, self.config.data_source.db());
         let sender = self
             .config
             .who(
@@ -666,7 +671,10 @@ impl HTML<'_> {
     /// `associated_message_guid`).
     fn resolve_in_reaction_to(&self, tapback_msg: &Message) -> Option<InReactionToVM> {
         let (_idx, target_guid) = tapback_msg.clean_associated_guid()?;
-        let target = Message::from_guid(target_guid, self.config.data_source.db()).ok()?;
+        let mut target = Message::from_guid(target_guid, self.config.data_source.db()).ok()?;
+        // Same reason as `resolve_replying_to`: snippet needs `text`
+        // materialized from the attributedBody blob.
+        apply_body(&mut target, self.config.data_source.db());
         let sender = self
             .config
             .who(
@@ -1503,6 +1511,47 @@ mod tests {
     }
 
     // MARK: Forensic mode reply tests
+
+    #[test]
+    fn forensic_html_reply_quote_header_carries_parent_text_not_attachment_placeholder() {
+        // Regression: resolve_replying_to must apply_body() on the fetched
+        // parent or its `text` column stays empty (iMessage stores message
+        // text in attributedBody, not the raw text column) and the snippet
+        // falls back to "[attachment]" / "[no preview]" instead of showing
+        // the actual message that was replied to.
+        const PARENT_GUID: &str = "0355C6E1-D0C8-4212-AA87-DD8AE4FD1203";
+
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.guid = "REPLY-WITH-TEXT".to_string();
+        message.text = Some("got it".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+        message.thread_originator_guid = Some(PARENT_GUID.to_string());
+        message.thread_originator_part = Some("0:0:0".to_string());
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+        assert!(
+            !actual.contains("[attachment]") && !actual.contains("[no preview]"),
+            "snippet must show parent's real text, not the placeholder; got: {actual}",
+        );
+        // The known parent's text in the bundled fixture
+        assert!(
+            actual.contains("eat as quick as possible"),
+            "expected parent message text inside the replying_to header, got: {actual}",
+        );
+    }
 
     #[test]
     fn forensic_html_reply_top_level_with_known_parent_renders_quote_header() {
