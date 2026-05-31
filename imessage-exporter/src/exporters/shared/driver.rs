@@ -182,11 +182,26 @@ where
 
         apply_body(&mut msg, writer.config().data_source.db());
 
+        let forensic = writer.config().options.forensic;
+
         if msg.is_announcement() {
             msg_buf.clear();
             writer.format_announcement(&msg, &mut msg_buf);
             let file = get_or_create_file_for(writer, &msg)?;
             file.write_all(msg_buf.as_bytes())?;
+        }
+        // Tapbacks render as timeline bubbles in forensic mode (so each
+        // add/remove is a first-class chronological event); otherwise they
+        // render in context under their target via `build_tapbacks` and are
+        // skipped here.
+        else if forensic && msg.is_tapback() {
+            msg_buf.clear();
+            let rendered = writer.format_tapback_bubble(&msg)?;
+            if !rendered.is_empty() {
+                msg_buf.push_str(&rendered);
+                let file = get_or_create_file_for(writer, &msg)?;
+                file.write_all(msg_buf.as_bytes())?;
+            }
         }
         // Message tapbacks and poll votes are rendered in context, so no need to render them separately
         else if !msg.is_tapback() && !msg.is_poll_vote() && !msg.is_poll_update() {

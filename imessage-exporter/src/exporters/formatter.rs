@@ -75,6 +75,14 @@ pub(crate) trait MessageFormatter<'a> {
     ) -> Result<String, RuntimeError>;
     /// Format a tapback (displayed under a message)
     fn format_tapback(&self, msg: &Message) -> Result<String, RuntimeError>;
+    /// Render a tapback as its own timeline bubble at its true chronological
+    /// position. Used by `--forensic` mode so tapback adds/removes are
+    /// surfaced as first-class events rather than hidden under the message
+    /// they reacted to. Default returns an empty string for formats that
+    /// don't have a useful per-row rendering (e.g. plain text).
+    fn format_tapback_bubble(&self, _msg: &Message) -> Result<String, RuntimeError> {
+        Ok(String::new())
+    }
     /// Render an announcement message directly into `out`. Permits reuse of
     /// the same buffer that [`format_message_into`](Self::format_message_into)
     /// uses, so the per-message hot path doesn't allocate per call.

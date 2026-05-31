@@ -25,7 +25,7 @@ use crate::{
             render::{render_template, render_template_into},
             reply::{build_replies, build_reply_snippet, build_tapbacks},
             tapback::resolve_tapback,
-            time::message_time,
+            time::{format_message_date, message_time},
         },
     },
 };
@@ -34,7 +34,7 @@ use imessage_database::{
     message_types::{
         edited::EditedMessage,
         text_effects::TextEffect,
-        variants::{Announcement, TapbackAction},
+        variants::{Announcement, Tapback, TapbackAction, Variant},
     },
     tables::{
         attachment::{Attachment, MediaType},
@@ -53,9 +53,9 @@ mod view_model;
 
 use safe::Html;
 use view_model::{
-    AnnouncementInnerVM, AttachmentVM, AttachmentVariant, EditedRow, EditedVM, MessagePartVM,
-    MessageVM, PartBody, RepliesVM, ReplyAnchorKind, ReplyingToVM, StickerSuffixVM, TapbackVM,
-    TapbacksVM,
+    AnnouncementInnerVM, AttachmentVM, AttachmentVariant, EditedRow, EditedVM, InReactionToVM,
+    MessagePartVM, MessageVM, PartBody, RepliesVM, ReplyAnchorKind, ReplyingToVM, StickerSuffixVM,
+    TapbackBubbleVM, TapbackVM, TapbacksVM,
 };
 
 // MARK: HTML
@@ -247,6 +247,42 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
         }))
     }
 
+    fn format_tapback_bubble(&self, msg: &Message) -> Result<String, RuntimeError> {
+        let Variant::Tapback(_, action, tapback) = msg.variant() else {
+            return Ok(String::new());
+        };
+        let is_removed = matches!(action, TapbackAction::Removed);
+        let action_word = if is_removed { "Removed" } else { "Added" };
+        // Tapback::Sticker, ::Loved, etc. render via Display; Emoji renders
+        // the bare emoji. Sanitize the resulting string so user-supplied
+        // emoji metadata can't smuggle markup.
+        let kind_string = match tapback {
+            Tapback::Sticker => "Sticker".to_string(),
+            other => format!("{other}"),
+        };
+        let kind_html = Html::trust(sanitize_html(&kind_string).into_owned());
+        let sender = self
+            .config
+            .who(msg.handle_id, msg.is_from_me(), &msg.destination_caller_id)
+            .to_string();
+        let timestamp = format_message_date(msg, self.config.offset);
+        let in_reaction_to = self.resolve_in_reaction_to(msg);
+        let guid_short = short_guid(&msg.guid);
+        let service = format!("{}", msg.service());
+        Ok(render_template(&TapbackBubbleVM {
+            guid: msg.guid.clone(),
+            guid_short,
+            is_from_me: msg.is_from_me(),
+            service,
+            timestamp,
+            sender,
+            kind_html,
+            action_word,
+            is_removed,
+            in_reaction_to,
+        }))
+    }
+
     fn format_announcement(&self, msg: &Message, out: &mut String) {
         let (kind, wrap_newlines) = match resolve_announcement(msg, self.config, YOU) {
             None => (AnnouncementBody::Unknown, true),
@@ -398,11 +434,20 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
                 .map(|replies| RepliesVM { replies })
             };
 
+            // In forensic mode tapbacks render as their own timeline
+            // bubbles (see `format_tapback_bubble`), so don't also render
+            // them under the message they reacted to.
+            let tapbacks = if forensic {
+                None
+            } else {
+                build_tapbacks(self, message, idx, Html::trust)?
+                    .map(|tapbacks| TapbacksVM { tapbacks })
+            };
+
             parts.push(MessagePartVM {
                 body,
                 expressive: ctx.expressive,
-                tapbacks: build_tapbacks(self, message, idx, Html::trust)?
-                    .map(|tapbacks| TapbacksVM { tapbacks }),
+                tapbacks,
                 replies,
             });
         }
@@ -549,6 +594,19 @@ impl PartBodyBuilder for HTML<'_> {
     }
 }
 
+/// Truncate a message GUID for human-readable display in forensic-mode
+/// tapback bubbles. Keeps the leading segment plus an ellipsis so the
+/// bubble stays compact while remaining greppable against the full id.
+fn short_guid(guid: &str) -> String {
+    const PREFIX_CHARS: usize = 8;
+    let prefix: String = guid.chars().take(PREFIX_CHARS).collect();
+    if guid.chars().count() <= PREFIX_CHARS {
+        prefix
+    } else {
+        format!("{prefix}…")
+    }
+}
+
 // MARK: Impl
 impl HTML<'_> {
     /// Resolve the message a reply is responding to and build the
@@ -571,6 +629,29 @@ impl HTML<'_> {
             sender,
             snippet: build_reply_snippet(&parent),
             anchor_target: parent.guid,
+        })
+    }
+
+    /// Resolve the message that a tapback was applied to so the bubble can
+    /// show "in reaction to <sender>: <snippet>" and link back to the
+    /// target's anchor. Returns `None` when the target isn't in the
+    /// database (filtered out, recently-deleted, or unparseable
+    /// `associated_message_guid`).
+    fn resolve_in_reaction_to(&self, tapback_msg: &Message) -> Option<InReactionToVM> {
+        let (_idx, target_guid) = tapback_msg.clean_associated_guid()?;
+        let target = Message::from_guid(target_guid, self.config.data_source.db()).ok()?;
+        let sender = self
+            .config
+            .who(
+                target.handle_id,
+                target.is_from_me(),
+                &target.destination_caller_id,
+            )
+            .to_string();
+        Some(InReactionToVM {
+            sender,
+            snippet: build_reply_snippet(&target),
+            anchor_target: target.guid,
         })
     }
 
@@ -1070,6 +1151,196 @@ mod tests {
         let expected = "<div class=\"message\">\n    <div class=\"sent iMessage\">\n        <p>\n            <span class=\"timestamp\">\n                <a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=PLAIN-GUID\">May 17, 2022  5:29:42 PM</a>\n                \n            </span>\n            \n            <span class=\"sender\">Me</span>\n        </p>\n        \n        \n        \n        \n        \n        <hr>\n<div class=\"message_part\">\n    <span class=\"bubble\">hello</span>\n    </div>\n\n        \n        \n    </div>\n</div>\n";
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn short_guid_under_threshold_returned_as_is() {
+        assert_eq!(super::short_guid("ABCDEF"), "ABCDEF");
+    }
+
+    #[test]
+    fn short_guid_at_threshold_returned_as_is() {
+        assert_eq!(super::short_guid("ABCDEFGH"), "ABCDEFGH");
+    }
+
+    #[test]
+    fn short_guid_over_threshold_truncated_with_ellipsis() {
+        assert_eq!(
+            super::short_guid("ABCDEFGHIJKL-1234"),
+            "ABCDEFGH…",
+        );
+    }
+
+    // MARK: Forensic mode tapback bubble tests
+
+    #[test]
+    fn forensic_html_tapback_bubble_added_loved_with_known_target() {
+        const TARGET_GUID: &str = "0355C6E1-D0C8-4212-AA87-DD8AE4FD1203";
+
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.guid = "TAPBACK-GUID-FULL-1234567890".to_string();
+        message.associated_message_type = Some(2000); // Added Loved
+        message.associated_message_guid = Some(format!("p:0/{TARGET_GUID}"));
+        message.handle_id = Some(999999);
+
+        let actual = exporter.format_tapback_bubble(&message).unwrap();
+
+        // Anchors: bubble has its own id, reaction reference points at target
+        assert!(
+            actual.contains("id=\"TAPBACK-GUID-FULL-1234567890\""),
+            "expected bubble id=guid, got: {actual}",
+        );
+        assert!(
+            actual.contains(&format!("href=\"#{TARGET_GUID}\"")),
+            "expected reference link to target, got: {actual}",
+        );
+        // Summary line carries kind + action + sender + timestamp
+        assert!(
+            actual.contains("Loved"),
+            "expected kind to be Loved, got: {actual}",
+        );
+        assert!(
+            actual.contains("Added by"),
+            "expected 'Added by' phrasing, got: {actual}",
+        );
+        assert!(
+            actual.contains("Sample Contact"),
+            "expected sender 'Sample Contact', got: {actual}",
+        );
+        assert!(
+            actual.contains("May 17, 2022  5:29:42 PM"),
+            "expected forensic timestamp, got: {actual}",
+        );
+        // GUID display present
+        assert!(
+            actual.contains("TAPBACK-…") || actual.contains("guid: TAPBACK"),
+            "expected short guid in bubble, got: {actual}",
+        );
+        // Removed-class not applied to Added
+        assert!(
+            !actual.contains("tapback_bubble_removed"),
+            "Added tapbacks should not carry the removed class, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn forensic_html_tapback_bubble_removed_loved_carries_removed_class() {
+        const TARGET_GUID: &str = "0355C6E1-D0C8-4212-AA87-DD8AE4FD1203";
+
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.guid = "REMOVED-TAPBACK-GUID".to_string();
+        message.associated_message_type = Some(3000); // Removed Loved
+        message.associated_message_guid = Some(format!("p:0/{TARGET_GUID}"));
+        message.handle_id = Some(999999);
+
+        let actual = exporter.format_tapback_bubble(&message).unwrap();
+        assert!(
+            actual.contains("tapback_bubble_removed"),
+            "Removed tapbacks must carry the removed class, got: {actual}",
+        );
+        assert!(
+            actual.contains("Removed by"),
+            "expected 'Removed by' phrasing, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn forensic_html_tapback_bubble_missing_target_omits_reference_header() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.guid = "ORPHAN-TAPBACK-GUID".to_string();
+        message.associated_message_type = Some(2000); // Added Loved
+        message.associated_message_guid = Some("p:0/MISSING-TARGET-GUID-XXXXXXXXXXXXXXXX".to_string());
+        message.handle_id = Some(999999);
+
+        let actual = exporter.format_tapback_bubble(&message).unwrap();
+        assert!(
+            !actual.contains("in_reaction_to"),
+            "orphan tapback bubble should omit reference header, got: {actual}",
+        );
+        // Bubble still renders so the row isn't lost
+        assert!(
+            actual.contains("id=\"ORPHAN-TAPBACK-GUID\""),
+            "orphan tapback bubble must still render with its anchor, got: {actual}",
+        );
+        assert!(
+            actual.contains("Loved"),
+            "orphan tapback bubble must still surface kind, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn forensic_html_message_with_tapbacks_does_not_inline_them() {
+        // When forensic is on, format_message_into must suppress the inline
+        // <div class="tapbacks"> block under a message. The tapbacks are
+        // rendered separately as timeline bubbles.
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, Name::fake_name("Sample Contact"));
+        config.real_participants.insert(999999, 999999);
+        // Pre-cache a tapback on this message's guid so build_tapbacks would
+        // otherwise emit a tapbacks block. We construct the cache manually
+        // because the fixture db's seed data is fixed.
+        let host_guid = "HOST-GUID".to_string();
+        let mut tb_msg = Config::fake_message();
+        tb_msg.guid = "FAKE-TB-GUID".to_string();
+        tb_msg.associated_message_type = Some(2000);
+        tb_msg.associated_message_guid = Some(format!("p:0/{host_guid}"));
+        tb_msg.handle_id = Some(999999);
+        let mut idx_map = std::collections::HashMap::new();
+        idx_map.insert(0_usize, vec![tb_msg]);
+        config.tapbacks.insert(host_guid.clone(), idx_map);
+
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut host = Config::fake_message();
+        host.date = 674526582885055488;
+        host.guid = host_guid;
+        host.text = Some("hi".to_string());
+        host.is_from_me = true;
+        host.chat_id = Some(0);
+        host.generate_text_legacy(config.data_source.db()).unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&host, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+        assert!(
+            !actual.contains("class=\"tapbacks\""),
+            "expected no inline tapbacks block in forensic mode, got: {actual}",
+        );
     }
 
     // MARK: Forensic mode reply tests

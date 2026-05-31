@@ -1,0 +1,7 @@
+<div class="tapback_bubble{% if is_removed %} tapback_bubble_removed{% endif %}" id="{{ guid }}">
+    <div class="{% if is_from_me %}sent {{ service }}{% else %}received{% endif %}">{% if let Some(rt) = in_reaction_to %}
+        <div class="in_reaction_to"><a href="#{{ rt.anchor_target }}">↩ in reaction to {{ rt.sender }}: &ldquo;{{ rt.snippet }}&rdquo;</a></div>{% endif %}
+        <p class="tapback_summary"><span class="tapback_kind">{{ kind_html|safe }}</span> {{ action_word }} by <span class="sender">{{ sender }}</span> <span class="tapback_timestamp">· {{ timestamp }}</span></p>
+        <p class="tapback_guid">guid: {{ guid_short }}</p>
+    </div>
+</div>

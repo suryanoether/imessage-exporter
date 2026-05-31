@@ -276,6 +276,39 @@ pub(super) struct ReplyingToVM {
     pub anchor_target: String,
 }
 
+/// Reference header shown inside a tapback bubble in forensic mode. Same
+/// shape as [`ReplyingToVM`] but rendered with the tapback-specific
+/// phrasing ("in reaction to") and styling.
+pub(super) struct InReactionToVM {
+    pub sender: String,
+    pub snippet: String,
+    pub anchor_target: String,
+}
+
+#[derive(Template)]
+#[template(path = "tapback_bubble.html")]
+pub(super) struct TapbackBubbleVM {
+    /// Full GUID of the tapback row, used as the bubble's anchor id.
+    pub guid: String,
+    /// Truncated GUID for visible display in the bubble.
+    pub guid_short: String,
+    pub is_from_me: bool,
+    pub service: String,
+    pub timestamp: String,
+    pub sender: String,
+    /// Pre-rendered kind label (e.g. "Loved", "☕\u{fe0f}", "Sticker").
+    /// Escaped already; pass through with `|safe`.
+    pub kind_html: Html,
+    /// "Added" or "Removed".
+    pub action_word: &'static str,
+    /// Toggles a `tapback_bubble_removed` class on the wrapper so removals
+    /// can be styled distinctly (strikethrough, muted).
+    pub is_removed: bool,
+    /// Resolved when the target message is in the database. `None` for
+    /// tapbacks whose target was filtered out or genuinely missing.
+    pub in_reaction_to: Option<InReactionToVM>,
+}
+
 #[derive(Template)]
 #[template(path = "message.html")]
 pub(super) struct MessageVM<'a> {

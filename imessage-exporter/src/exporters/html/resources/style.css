@@ -253,7 +253,8 @@ div.tapback {
     align-items: center;
 }
 
-.replying_to {
+.replying_to,
+.in_reaction_to {
     border-left: 3px solid var(--muted-text);
     padding: 0.15em 0.6em;
     margin: 0.2em 0 0.4em 0;
@@ -261,13 +262,61 @@ div.tapback {
     color: var(--muted-text);
 }
 
-.replying_to a {
+.replying_to a,
+.in_reaction_to a {
     text-decoration: none;
     color: inherit;
 }
 
-.replying_to a:hover {
+.replying_to a:hover,
+.in_reaction_to a:hover {
     text-decoration: underline;
+}
+
+.tapback_bubble {
+    margin: 0.4em 2vw;
+    padding: 0.4em 0.8em;
+    border: 1px dashed var(--muted-text);
+    border-radius: 0.6em;
+    font-size: 0.9em;
+    max-width: 60vw;
+    color: var(--muted-text);
+    background: transparent;
+}
+
+.tapback_bubble .sent,
+.tapback_bubble .received {
+    background: transparent;
+    padding: 0;
+}
+
+.tapback_bubble .tapback_summary {
+    margin: 0.2em 0;
+}
+
+.tapback_bubble .tapback_kind {
+    font-weight: bold;
+    color: inherit;
+}
+
+.tapback_bubble .tapback_timestamp {
+    font-variant-numeric: tabular-nums;
+}
+
+.tapback_bubble .tapback_guid {
+    margin: 0;
+    font-size: 0.75em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    opacity: 0.7;
+}
+
+.tapback_bubble_removed {
+    border-style: dotted;
+    opacity: 0.75;
+}
+
+.tapback_bubble_removed .tapback_kind {
+    text-decoration: line-through;
 }
 
 .tapback_time {
