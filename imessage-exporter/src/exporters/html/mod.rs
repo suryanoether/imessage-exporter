@@ -771,6 +771,26 @@ fn query_forensic_extras(db: &rusqlite::Connection, msg_rowid: i32) -> ForensicE
 /// Truncate a message GUID for human-readable display in forensic-mode
 /// tapback bubbles. Keeps the leading segment plus an ellipsis so the
 /// bubble stays compact while remaining greppable against the full id.
+/// Translate a tapback row's `associated_message_type` integer into the
+/// human-readable reaction label, e.g. "Laughed Removed" instead of
+/// the raw `Some(3003)` debug output. Falls back to the numeric code
+/// when the variant isn't recognized as a tapback.
+fn describe_tapback(msg: &Message) -> String {
+    match msg.variant() {
+        Variant::Tapback(_, action, tapback) => {
+            let action_word = match action {
+                TapbackAction::Added => "Added",
+                TapbackAction::Removed => "Removed",
+            };
+            format!("{tapback} {action_word}")
+        }
+        _ => match msg.associated_message_type {
+            Some(code) => format!("associated_type {code}"),
+            None => "unknown reaction".to_string(),
+        },
+    }
+}
+
 fn short_guid(guid: &str) -> String {
     const PREFIX_CHARS: usize = 8;
     let prefix: String = guid.chars().take(PREFIX_CHARS).collect();
@@ -979,15 +999,20 @@ impl HTML<'_> {
         let Some((idx, target_guid)) = tapback_msg.clean_associated_guid() else {
             if self.config.options.forensic && tapback_msg.associated_message_guid.is_some() {
                 eprintln!(
-                    "[forensic] tapback with unparseable associated_message_guid: rowid={} guid={} raw={:?}",
+                    "[forensic] tapback with unparseable associated_message_guid: rowid={} guid={} raw={}",
                     tapback_msg.rowid,
                     tapback_msg.guid,
-                    tapback_msg.associated_message_guid,
+                    tapback_msg.associated_message_guid.as_deref().unwrap_or(""),
                 );
             }
             return None;
         };
         let target_guid_owned = target_guid.to_string();
+        // Decode `associated_message_type` to the human-readable
+        // reaction once so both the rendered fallback and the
+        // stderr log use the same wording. "Some(3003)" is Debug
+        // output of an Option<i32> — useless to a court reviewer.
+        let reaction_label = describe_tapback(tapback_msg);
         let target = Message::from_guid(target_guid, self.config.data_source.db());
         let Ok(mut target) = target else {
             // Fallback: target not in DB. Still surface the reference
@@ -996,19 +1021,18 @@ impl HTML<'_> {
             // it pointed.
             if self.config.options.forensic {
                 eprintln!(
-                    "[forensic] tapback target not in DB: tapback rowid={} guid={} → target_guid={} associated_message_guid={:?}",
+                    "[forensic] tapback target not in DB: tapback rowid={} guid={} reaction={reaction_label} → target_guid={} associated_message_guid={}",
                     tapback_msg.rowid,
                     tapback_msg.guid,
                     target_guid_owned,
-                    tapback_msg.associated_message_guid,
+                    tapback_msg.associated_message_guid.as_deref().unwrap_or(""),
                 );
             }
             return Some(InReactionToVM {
                 sender: "(target not in source)".to_string(),
                 snippet: format!(
-                    "[target guid: {} · part: {idx} · associated_type: {:?}]",
+                    "[target guid: {} · part: {idx} · reaction: {reaction_label}]",
                     short_guid(&target_guid_owned),
-                    tapback_msg.associated_message_type,
                 ),
                 anchor_target: target_guid_owned,
             });
