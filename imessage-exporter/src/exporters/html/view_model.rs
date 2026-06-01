@@ -266,21 +266,12 @@ pub(super) struct AnnouncementInnerVM<'a> {
 }
 
 /// Per-message metadata strip rendered at the bottom of every bubble in
-/// forensic mode. Captures the GUID, delivery / read timestamps, edit
-/// indicator, deletion indicator, and chat id so each bubble is verifiable
-/// against the source database.
-///
-/// Fields are emitted only when non-empty (e.g. `delivered` is `None` for
-/// rows where `date_delivered == 0`), keeping the strip readable.
+/// forensic mode. Pre-rendered HTML so the message template can embed it
+/// without branching on each field — `build_forensic_meta` is responsible
+/// for assembling and escaping. The strip is laid out as a single line
+/// of `·`-separated tokens; CSS handles wrapping.
 pub(super) struct ForensicMetaVM {
-    /// Truncated GUID for display (e.g. "ABC12345…"). Full GUID lives on
-    /// the outer wrapper as the anchor id.
-    pub guid_short: String,
-    pub delivered: Option<String>,
-    pub read: Option<String>,
-    pub edited: bool,
-    pub deleted: bool,
-    pub chat_id: Option<i32>,
+    pub line_html: Html,
 }
 
 /// Quote header shown above a reply in forensic mode so the reader sees

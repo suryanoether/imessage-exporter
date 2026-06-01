@@ -613,6 +613,49 @@ impl PartBodyBuilder for HTML<'_> {
     }
 }
 
+/// Fields not on the `Message` struct that the forensic_meta strip
+/// needs. Fetched per-message via a small cached query — cheap because
+/// the statement reuses its prepared plan across iterations.
+#[derive(Default)]
+struct ForensicExtras {
+    /// Raw `handle.id` (phone or email) of the sender, joined via
+    /// `message.handle_id`. `None` for messages I sent (handle_id is null
+    /// for is_from_me=true rows in the schema).
+    sender_handle: Option<String>,
+    /// `message.error` when non-zero. iMessage stores 0 for successful
+    /// sends and various error codes when delivery failed.
+    error_code: Option<i32>,
+    /// `true` if `message.message_summary_info` BLOB is non-null. The
+    /// blob itself carries edit history and other typedstream data; just
+    /// flagging presence here lets the reviewer know there's additional
+    /// material in the source row.
+    has_summary_info: bool,
+}
+
+fn query_forensic_extras(db: &rusqlite::Connection, msg_rowid: i32) -> ForensicExtras {
+    let stmt_result = db.prepare_cached(
+        "SELECT h.id, m.error,
+                CASE WHEN m.message_summary_info IS NOT NULL THEN 1 ELSE 0 END
+         FROM message m
+         LEFT JOIN handle h ON m.handle_id = h.rowid
+         WHERE m.rowid = ?1",
+    );
+    let Ok(mut stmt) = stmt_result else {
+        return ForensicExtras::default();
+    };
+    stmt.query_row([msg_rowid], |r| {
+        Ok(ForensicExtras {
+            sender_handle: r.get::<_, Option<String>>(0).unwrap_or(None),
+            error_code: r
+                .get::<_, i32>(1)
+                .ok()
+                .filter(|&e| e != 0),
+            has_summary_info: r.get::<_, i64>(2).unwrap_or(0) != 0,
+        })
+    })
+    .unwrap_or_default()
+}
+
 /// Truncate a message GUID for human-readable display in forensic-mode
 /// tapback bubbles. Keeps the leading segment plus an ellipsis so the
 /// bubble stays compact while remaining greppable against the full id.
@@ -679,22 +722,98 @@ impl HTML<'_> {
     }
 
     /// Build the per-message forensic metadata strip rendered at the
-    /// bottom of every bubble in `--forensic` mode. Timestamps are emitted
-    /// only when the underlying field is non-zero so untracked events
-    /// (e.g. a never-read message) leave the strip cleaner rather than
-    /// rendering an epoch-of-2001 placeholder.
+    /// bottom of every bubble in `--forensic` mode. Assembled as a single
+    /// pre-escaped HTML line of `·`-separated tokens. Untracked
+    /// timestamps (`date_read == 0`) are rendered as `not recorded` so
+    /// absence is positively acknowledged rather than ambiguous.
     fn build_forensic_meta(&self, message: &Message) -> ForensicMetaVM {
-        let delivered = (message.date_delivered != 0)
-            .then(|| format_timestamp_with_tz(message.date_delivered, self.config.offset));
-        let read = (message.date_read != 0)
-            .then(|| format_timestamp_with_tz(message.date_read, self.config.offset));
+        let extras = query_forensic_extras(self.config.data_source.db(), message.rowid);
+
+        let mut tokens: Vec<String> = Vec::new();
+
+        // Identity ---------------------------------------------------------
+        tokens.push(format!(
+            "<span class=\"forensic_meta_guid\">guid: {}</span>",
+            sanitize_html(&short_guid(&message.guid)),
+        ));
+        tokens.push(format!("<span>rowid: {}</span>", message.rowid));
+        if let Some(c) = message.chat_id {
+            tokens.push(format!("<span>chat: {c}</span>"));
+        }
+        if let Some(service) = message.service.as_deref() {
+            tokens.push(format!(
+                "<span>service: {}</span>",
+                sanitize_html(service),
+            ));
+        }
+        if let Some(handle) = extras.sender_handle.as_deref() {
+            tokens.push(format!(
+                "<span>handle: {}</span>",
+                sanitize_html(handle),
+            ));
+        }
+        if let Some(addr) = message.destination_caller_id.as_deref() {
+            tokens.push(format!(
+                "<span>addressed_to: {}</span>",
+                sanitize_html(addr),
+            ));
+        }
+
+        // Temporal ---------------------------------------------------------
+        if message.date_delivered != 0 {
+            tokens.push(format!(
+                "<span>delivered: {}</span>",
+                sanitize_html(&format_timestamp_with_tz(
+                    message.date_delivered,
+                    self.config.offset,
+                )),
+            ));
+        } else if message.is_from_me() {
+            // For sent messages, the absence is meaningful (not delivered
+            // or RR disabled) — call it out.
+            tokens.push("<span>delivered: not recorded</span>".to_string());
+        }
+        if message.date_read != 0 {
+            tokens.push(format!(
+                "<span>read: {}</span>",
+                sanitize_html(&format_timestamp_with_tz(
+                    message.date_read,
+                    self.config.offset,
+                )),
+            ));
+        } else {
+            // Always emit "read: not recorded" so a zero is unambiguous
+            // (could be unread OR read-receipts disabled). Never silently
+            // omit.
+            tokens.push("<span>read: not recorded</span>".to_string());
+        }
+
+        // Flags ------------------------------------------------------------
+        if message.is_edited() {
+            tokens.push("<span class=\"forensic_meta_flag\">edited</span>".to_string());
+        }
+        if message.is_deleted() {
+            tokens.push("<span class=\"forensic_meta_flag\">deleted</span>".to_string());
+        }
+        if let Some(d) = message.deleted_from {
+            tokens.push(format!("<span>deleted_from: {d}</span>"));
+        }
+        if let Some(err) = extras.error_code {
+            tokens.push(format!(
+                "<span class=\"forensic_meta_flag\">error: {err}</span>",
+            ));
+        }
+        if extras.has_summary_info {
+            tokens.push("<span>has_summary_info</span>".to_string());
+        }
+
+        let sep = " <span class=\"forensic_meta_sep\">·</span> ";
+        let line = format!(
+            "<p class=\"forensic_meta\">{}</p>",
+            tokens.join(sep),
+        );
         ForensicMetaVM {
-            guid_short: short_guid(&message.guid),
-            delivered,
-            read,
-            edited: message.is_edited(),
-            deleted: message.is_deleted(),
-            chat_id: message.chat_id,
+            line_html: Html::trust(line),
         }
     }
 
@@ -1470,8 +1589,159 @@ mod tests {
         );
     }
 
+    // MARK: Phase B per-message metadata extensions
+
     #[test]
-    fn forensic_html_message_omits_zero_delivery_and_read_fields() {
+    fn forensic_meta_includes_rowid_and_service() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.rowid = 13579;
+        message.service = Some("iMessage".to_string());
+        message.guid = "PHASEB-RID-GUID-001".to_string();
+        message.text = Some("hi".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(7);
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+        assert!(
+            actual.contains("rowid: 13579"),
+            "expected rowid in forensic_meta, got: {actual}",
+        );
+        assert!(
+            actual.contains("service: iMessage"),
+            "expected service label in forensic_meta, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn forensic_meta_includes_destination_caller_id() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.guid = "PHASEB-DCI-GUID-002".to_string();
+        message.text = Some("hi".to_string());
+        message.is_from_me = false;
+        message.chat_id = Some(7);
+        message.destination_caller_id = Some("bob@example.com".to_string());
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+        assert!(
+            actual.contains("addressed_to: bob@example.com"),
+            "expected destination_caller_id surfaced as `addressed_to`, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn forensic_meta_includes_deleted_from_when_set() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.guid = "PHASEB-DEL-GUID-003".to_string();
+        message.text = Some("hi".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(7);
+        message.deleted_from = Some(17);
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+        assert!(
+            actual.contains("deleted_from: 17"),
+            "expected deleted_from in forensic_meta, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn forensic_meta_omits_addressed_to_when_destination_caller_id_is_none() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.guid = "PHASEB-NDCI-GUID".to_string();
+        message.text = Some("hi".to_string());
+        message.is_from_me = false;
+        message.chat_id = Some(7);
+        message.destination_caller_id = None;
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+        assert!(
+            !actual.contains("addressed_to:"),
+            "addressed_to must be omitted when destination_caller_id is None, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn forensic_meta_omits_deleted_from_when_unset() {
+        let mut options = Options::fake_options(ExportType::Html);
+        options.forensic = true;
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.guid = "PHASEB-NDEL-GUID".to_string();
+        message.text = Some("hi".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(7);
+        message.deleted_from = None;
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+        assert!(
+            !actual.contains("deleted_from:"),
+            "deleted_from must be omitted when not set, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn forensic_html_message_renders_not_recorded_for_missing_timestamps() {
+        // Phase B item 8: a zero `date_read` could mean "unread" OR "RR
+        // disabled". The strip now positively acknowledges absence
+        // (`read: not recorded`) so the field is never silently omitted.
+        // Same idea applies to `delivered:` on sent messages.
         let mut options = Options::fake_options(ExportType::Html);
         options.forensic = true;
         let config = Config::fake_app(options);
@@ -1502,12 +1772,12 @@ mod tests {
             "expected truncated guid, got: {actual}",
         );
         assert!(
-            !actual.contains("delivered:"),
-            "must NOT render delivered when date_delivered==0, got: {actual}",
+            actual.contains("delivered: not recorded"),
+            "sent messages without a delivered ts must surface `not recorded`, got: {actual}",
         );
         assert!(
-            !actual.contains("read:"),
-            "must NOT render read when date_read==0, got: {actual}",
+            actual.contains("read: not recorded"),
+            "messages without a read ts must surface `not recorded`, got: {actual}",
         );
         assert!(
             !actual.contains(">edited<"),
@@ -4773,6 +5043,35 @@ mod forensic_integration_tests {
         assert!(
             !html.contains("class=\"forensic_scope\""),
             "default mode must not render a forensic_scope element",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_meta_strip_includes_phase_b_fields() {
+        // The fixture's anchor message (the "I'm going to try to eat..."
+        // row from test.db) has handle_id pointing at the fixture's
+        // injected handle "+15555550100". The meta strip should surface
+        // that as `handle: +15555550100` and the message's service as
+        // `service: iMessage`.
+        let html = export_to_string("phase_b_fields", true);
+        assert!(
+            html.contains("rowid:"),
+            "expected rowid token in forensic_meta, got: missing",
+        );
+        assert!(
+            html.contains("service: iMessage"),
+            "expected service token in forensic_meta, got: missing",
+        );
+        assert!(
+            html.contains("handle: +15555550100"),
+            "expected handle token in forensic_meta (DB-joined from fixture handle), got: missing",
+        );
+        // Read-receipt disambiguation: every message MUST emit `read:`
+        // even when the column is zero, so the absence is positively
+        // acknowledged.
+        assert!(
+            html.contains("read:"),
+            "every forensic_meta strip must surface `read:`, got: missing",
         );
     }
 
