@@ -19,6 +19,28 @@ body {
     color: var(--text-color);
 }
 
+/* Print / save-to-PDF: keep each visual unit on a single page so
+   messages aren't cut in half across page breaks. Both the legacy
+   `page-break-inside` spelling and the modern `break-inside` are
+   emitted — macOS Preview, older wkhtmltopdf, and older Safari print
+   only honor the legacy form; Chrome / current Safari honor either.
+   For a row taller than a page (rare: huge attachments, very long
+   edit histories) the engine will still split — there's no way around
+   that other than shrinking the row. */
+.message,
+.tapback_bubble,
+.export_summary,
+.recovered_banner,
+.announcement,
+.forensic_skip {
+    break-inside: avoid;
+    page-break-inside: avoid;
+}
+
+@page {
+    margin: 0.75in;
+}
+
 p {
     margin: 0;
 }
