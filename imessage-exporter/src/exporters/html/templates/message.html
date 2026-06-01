@@ -13,7 +13,7 @@
             <span class="reply_anchor"><a title="View in thread" href="#{{ guid }}">⇱</a></span>
             {% endmatch %}
             {% endif %}
-            <span class="sender">{{ sender }}</span>
+            <span class="sender">{{ sender }}{% if let Some(h) = sender_handle_inline %} <span class="sender_handle">({{ h }})</span>{% endif %}</span>
         </p>{% if let Some(rt) = replying_to %}
         <div class="replying_to"><a href="#{{ rt.anchor_target }}">↪ {{ rt.sender }}: &ldquo;{{ rt.snippet }}&rdquo;</a></div>{% endif %}
         {% if is_deleted %}

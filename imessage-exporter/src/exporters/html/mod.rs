@@ -494,11 +494,26 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
             None
         };
 
-        let forensic_meta = if forensic {
-            Some(self.build_forensic_meta(message))
-        } else {
-            None
-        };
+        // Query DB-joined extras once when forensic mode is on; the
+        // result feeds both the inline sender label and the forensic_meta
+        // strip so we don't run the same query twice per message.
+        let extras = forensic
+            .then(|| query_forensic_extras(self.config.data_source.db(), message.rowid));
+        // Suppress the inline handle if it would just repeat the
+        // displayed name — `config.who` falls back to the raw handle
+        // when no contact-book name is available, which produces
+        // "+15555550100 (+15555550100)" otherwise.
+        let sender_display = self.config.who(
+            message.handle_id,
+            message.is_from_me(),
+            &message.destination_caller_id,
+        );
+        let sender_handle_inline = extras
+            .as_ref()
+            .and_then(|e| e.sender_handle.as_deref())
+            .filter(|h| *h != sender_display)
+            .map(str::to_string);
+        let forensic_meta = extras.map(|e| self.build_forensic_meta(message, &e));
 
         let vm = MessageVM {
             guid: &message.guid,
@@ -509,11 +524,7 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
             date,
             read_after,
             reply_anchor,
-            sender: self.config.who(
-                message.handle_id,
-                message.is_from_me(),
-                &message.destination_caller_id,
-            ),
+            sender: sender_display,
             is_deleted: message.is_deleted(),
             subject: message.subject.as_deref(),
             shareplay: message
@@ -525,6 +536,7 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
             parts,
             trailing_reply_context,
             forensic_meta,
+            sender_handle_inline,
         };
         render_template_into(&vm, out);
         Ok(())
@@ -622,6 +634,13 @@ struct ForensicExtras {
     /// `message.handle_id`. `None` for messages I sent (handle_id is null
     /// for is_from_me=true rows in the schema).
     sender_handle: Option<String>,
+    /// `handle.country` ISO country code (e.g. "us", "gb") when known.
+    /// Surfaces jurisdiction-relevant context on phone numbers.
+    sender_country: Option<String>,
+    /// `true` if the sender handle matches Apple's iCloud private relay
+    /// suffix (`*@privaterelay.appleid.com`). Signals that the sender
+    /// identity is masked by Apple — "we don't know who really sent this."
+    sender_uses_relay: bool,
     /// `message.error` when non-zero. iMessage stores 0 for successful
     /// sends and various error codes when delivery failed.
     error_code: Option<i32>,
@@ -632,9 +651,17 @@ struct ForensicExtras {
     has_summary_info: bool,
 }
 
+/// Suffix that identifies an iCloud Hide-My-Email / private relay
+/// address. Apple's documented format is `<random>@privaterelay.appleid.com`.
+const RELAY_SUFFIX: &str = "@privaterelay.appleid.com";
+
+fn handle_is_relay(handle: &str) -> bool {
+    handle.to_ascii_lowercase().ends_with(RELAY_SUFFIX)
+}
+
 fn query_forensic_extras(db: &rusqlite::Connection, msg_rowid: i32) -> ForensicExtras {
     let stmt_result = db.prepare_cached(
-        "SELECT h.id, m.error,
+        "SELECT h.id, h.country, m.error,
                 CASE WHEN m.message_summary_info IS NOT NULL THEN 1 ELSE 0 END
          FROM message m
          LEFT JOIN handle h ON m.handle_id = h.rowid
@@ -644,13 +671,20 @@ fn query_forensic_extras(db: &rusqlite::Connection, msg_rowid: i32) -> ForensicE
         return ForensicExtras::default();
     };
     stmt.query_row([msg_rowid], |r| {
+        let sender_handle: Option<String> = r.get::<_, Option<String>>(0).unwrap_or(None);
+        let sender_country: Option<String> = r
+            .get::<_, Option<String>>(1)
+            .unwrap_or(None)
+            .filter(|s| !s.is_empty());
+        let sender_uses_relay = sender_handle
+            .as_deref()
+            .is_some_and(handle_is_relay);
         Ok(ForensicExtras {
-            sender_handle: r.get::<_, Option<String>>(0).unwrap_or(None),
-            error_code: r
-                .get::<_, i32>(1)
-                .ok()
-                .filter(|&e| e != 0),
-            has_summary_info: r.get::<_, i64>(2).unwrap_or(0) != 0,
+            sender_handle,
+            sender_country,
+            sender_uses_relay,
+            error_code: r.get::<_, i32>(2).ok().filter(|&e| e != 0),
+            has_summary_info: r.get::<_, i64>(3).unwrap_or(0) != 0,
         })
     })
     .unwrap_or_default()
@@ -726,9 +760,10 @@ impl HTML<'_> {
     /// pre-escaped HTML line of `·`-separated tokens. Untracked
     /// timestamps (`date_read == 0`) are rendered as `not recorded` so
     /// absence is positively acknowledged rather than ambiguous.
-    fn build_forensic_meta(&self, message: &Message) -> ForensicMetaVM {
-        let extras = query_forensic_extras(self.config.data_source.db(), message.rowid);
-
+    ///
+    /// `extras` is queried once per message by the caller and reused
+    /// for the inline sender-handle label too.
+    fn build_forensic_meta(&self, message: &Message, extras: &ForensicExtras) -> ForensicMetaVM {
         let mut tokens: Vec<String> = Vec::new();
 
         // Identity ---------------------------------------------------------
@@ -751,6 +786,17 @@ impl HTML<'_> {
                 "<span>handle: {}</span>",
                 sanitize_html(handle),
             ));
+        }
+        if let Some(country) = extras.sender_country.as_deref() {
+            tokens.push(format!(
+                "<span>country: {}</span>",
+                sanitize_html(country),
+            ));
+        }
+        if extras.sender_uses_relay {
+            tokens.push(
+                "<span class=\"forensic_meta_flag\">relay_address</span>".to_string(),
+            );
         }
         if let Some(addr) = message.destination_caller_id.as_deref() {
             tokens.push(format!(
@@ -1590,6 +1636,16 @@ mod tests {
     }
 
     // MARK: Phase B per-message metadata extensions
+
+    #[test]
+    fn handle_is_relay_recognizes_apple_relay_suffix() {
+        assert!(super::handle_is_relay("abc@privaterelay.appleid.com"));
+        // Case-insensitive: schema sometimes stores mixed-case
+        assert!(super::handle_is_relay("ABC@PrivateRelay.AppleID.com"));
+        assert!(!super::handle_is_relay("alice@icloud.com"));
+        assert!(!super::handle_is_relay("+15551234567"));
+        assert!(!super::handle_is_relay("privaterelay.appleid.com@evil.com"));
+    }
 
     #[test]
     fn forensic_meta_includes_rowid_and_service() {
@@ -5043,6 +5099,48 @@ mod forensic_integration_tests {
         assert!(
             !html.contains("class=\"forensic_scope\""),
             "default mode must not render a forensic_scope element",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_meta_strip_surfaces_country_from_handle() {
+        // The fixture's primary handle has country = "us".
+        let html = export_to_string("phase_c_country", true);
+        assert!(
+            html.contains("country: us"),
+            "expected country code surfaced from the joined handle row",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_meta_strip_flags_relay_address() {
+        // The fixture includes a message sent by a handle whose id ends
+        // with `@privaterelay.appleid.com`. That message must carry the
+        // `relay_address` flag in its forensic_meta strip.
+        let html = export_to_string("phase_c_relay", true);
+        // Locate the relay message's bubble and check that the strip
+        // inside it has the flag (rather than just checking the global
+        // doc — other messages should NOT have the flag).
+        let needle = "id=\"F0R3N51C-0007-RELAY-MSGS-FFFF\"";
+        let start = html.find(needle).expect("relay message bubble present");
+        let tail = &html[start..];
+        let bubble_end = tail.find("</div>\n</div>").unwrap_or(tail.len());
+        let bubble = &tail[..bubble_end];
+        assert!(
+            bubble.contains("relay_address"),
+            "relay-handle message must carry the relay_address flag, got: {bubble}",
+        );
+
+        // Negative: the other messages (sent by the +15555550100 handle)
+        // must NOT have the flag.
+        let needle = "id=\"FAKEGUID-D0C8-4212-AA87-DD8AE4FD1203\"";
+        let start = html.find(needle).expect("normal message present");
+        let tail = &html[start..];
+        let bubble_end = tail.find("</div>\n</div>").unwrap_or(tail.len());
+        let bubble = &tail[..bubble_end];
+        assert!(
+            !bubble.contains("relay_address"),
+            "non-relay messages must not carry the relay_address flag, got: {bubble}",
         );
     }
 

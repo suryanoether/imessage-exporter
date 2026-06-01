@@ -334,6 +334,11 @@ pub(super) struct MessageVM<'a> {
     /// Forensic metadata strip rendered at the bottom of the bubble. Only
     /// populated in `--forensic` mode.
     pub forensic_meta: Option<ForensicMetaVM>,
+    /// In `--forensic` mode, the sender's raw handle (phone/email) shown
+    /// inline next to the contact name — so when the same person appears
+    /// under multiple addresses across the conversation, every message
+    /// shows which one was used.
+    pub sender_handle_inline: Option<String>,
     /// True for `<div class="sent {service}">`, false for `<div class="received">`.
     pub is_from_me: bool,
     pub service: Service<'a>,
