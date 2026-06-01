@@ -79,7 +79,11 @@ impl<'a> MessageWriter<'a> for TXT<'a> {
         &mut self.state
     }
 
-    fn write_file_header(_file: &mut BufWriter<File>) -> Result<(), RuntimeError> {
+    fn write_file_header(
+        _file: &mut BufWriter<File>,
+        _chat_id: Option<i32>,
+        _config: &Config,
+    ) -> Result<(), RuntimeError> {
         Ok(())
     }
 

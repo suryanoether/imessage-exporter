@@ -18,7 +18,7 @@ use crate::{
             announcement::{AnnouncementBody, resolve_announcement},
             attachment::prepare_attachment,
             balloon::dispatch_app_balloon,
-            driver::{ExportState, MessageWriter, apply_body},
+            driver::{ExportState, FileScope, MessageWriter, apply_body, compute_file_scope},
             edited::{EditDiff, normalize_edited},
             message::MessageContext,
             part::dispatch_part_body,
@@ -106,8 +106,20 @@ impl<'a> MessageWriter<'a> for HTML<'a> {
         &mut self.state
     }
 
-    fn write_file_header(file: &mut BufWriter<File>) -> Result<(), RuntimeError> {
-        HTML::write_headers(file)
+    fn write_file_header(
+        file: &mut BufWriter<File>,
+        chat_id: Option<i32>,
+        config: &Config,
+    ) -> Result<(), RuntimeError> {
+        HTML::write_headers(file)?;
+        if config.options.forensic
+            && let Some(cid) = chat_id
+            && let Some(scope) = compute_file_scope(config.data_source.db(), cid)
+        {
+            let html = render_forensic_scope(&scope, config);
+            file.write_all(html.as_bytes())?;
+        }
+        Ok(())
     }
 
     fn write_file_footer(file: &mut BufWriter<File>) -> Result<(), RuntimeError> {
@@ -612,6 +624,28 @@ fn short_guid(guid: &str) -> String {
     } else {
         format!("{prefix}…")
     }
+}
+
+/// Render the per-chat forensic provenance banner that appears at the top
+/// of every HTML file in `--forensic` mode. Inlined HTML (no askama
+/// template) so it stays a single contained function — the layout is
+/// small and won't grow with messages.
+fn render_forensic_scope(scope: &FileScope, config: &Config) -> String {
+    let first = scope
+        .first_date
+        .map(|d| format_timestamp_with_tz(d, config.offset))
+        .unwrap_or_else(|| "—".to_string());
+    let last = scope
+        .last_date
+        .map(|d| format_timestamp_with_tz(d, config.offset))
+        .unwrap_or_else(|| "—".to_string());
+    format!(
+        "<header class=\"forensic_scope\">\n\
+         <p><strong>Forensic scope.</strong> chat: {chat} · messages in source DB: {count} · first: {first} · last: {last}</p>\n\
+         </header>\n",
+        chat = scope.chat_id,
+        count = scope.message_count,
+    )
 }
 
 // MARK: Impl
@@ -4686,14 +4720,60 @@ mod forensic_integration_tests {
         std::fs::create_dir_all(&dir).unwrap();
         options.export_path = dir.clone();
 
-        let config = Config::fake_app(options);
+        // Build the full Config (not `fake_app`) so the chatrooms cache
+        // is populated and messages route to the proper per-chat file.
+        // Without this, the fixture's chat_message_join entries are
+        // ignored and the scope header never renders.
+        let config = Config::new(options).expect("Config::new must succeed for the fixture");
         let mut writer = HTML::new(&config).unwrap();
         run_export(&mut writer).unwrap();
 
-        let html = std::fs::read_to_string(dir.join("orphaned.html"))
-            .expect("orphaned.html should exist after run_export");
+        // Read every `.html` file in the export dir and concatenate so
+        // assertions don't depend on filename details (a routed-chat
+        // file vs `orphaned.html` is the same content surface for the
+        // purposes of these tests).
+        let mut combined = String::new();
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("html") {
+                combined.push_str(&std::fs::read_to_string(&path).unwrap());
+                combined.push('\n');
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
-        html
+        combined
+    }
+
+    #[test]
+    fn forensic_full_pipeline_renders_scope_header_on_chat_file() {
+        let html = export_to_string("scope_header", true);
+        assert!(
+            html.contains("class=\"forensic_scope\""),
+            "expected forensic_scope header in chat file",
+        );
+        assert!(
+            html.contains("messages in source DB:"),
+            "scope block must declare message count",
+        );
+        assert!(
+            html.contains("first: Feb 06, 2025"),
+            "scope block must include first-message date with TZ",
+        );
+        assert!(
+            html.contains("PST") || html.contains("PDT"),
+            "scope block timestamps must carry the TZ abbreviation",
+        );
+    }
+
+    #[test]
+    fn default_mode_no_scope_header() {
+        let html = export_to_string("default_no_scope", false);
+        // The CSS block always contains `.forensic_scope` selectors. Test
+        // that the *rendered element* is absent, not the selector text.
+        assert!(
+            !html.contains("class=\"forensic_scope\""),
+            "default mode must not render a forensic_scope element",
+        );
     }
 
     #[test]

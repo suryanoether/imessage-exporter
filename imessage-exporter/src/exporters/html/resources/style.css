@@ -319,6 +319,29 @@ div.tapback {
     text-decoration: line-through;
 }
 
+.forensic_scope {
+    margin: 1em 2vw;
+    padding: 0.6em 0.9em;
+    border: 1px solid var(--muted-text);
+    border-radius: 0.4em;
+    background: rgba(128, 128, 128, 0.06);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85em;
+    color: var(--muted-text);
+}
+
+.forensic_scope p {
+    margin: 0;
+}
+
+.forensic_scope strong {
+    color: inherit;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: bold;
+    margin-right: 0.4em;
+}
+
 .forensic_meta {
     margin: 0.3em 0 0 0;
     padding-top: 0.25em;

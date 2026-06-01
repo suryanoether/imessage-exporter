@@ -7,6 +7,24 @@
 -- tests can run without a build step, but this file is the source of truth for
 -- what's inside it. If you regenerate the fixture, mirror these inserts.
 --
+-- (0) Scaffolding so messages route to a per-chat file (not orphaned). The
+-- per-file forensic scope header only renders for messages that have a
+-- resolvable chat:
+--
+--     INSERT INTO handle (id, country, service, uncanonicalized_id)
+--       VALUES ('+15555550100', 'us', 'iMessage', '+15555550100');
+--     INSERT INTO chat (guid, chat_identifier, service_name, display_name)
+--       VALUES ('forensic-fixture-chat', '+15555550100', 'iMessage',
+--               'Forensic Fixture Chat');
+--     INSERT INTO chat_handle_join (chat_id, handle_id)
+--       VALUES (<new_chat_rowid>, <new_handle_rowid>);
+--
+-- After (1)-(6) below, every fixture message (including the 3 inherited
+-- from test.db) is wired into the chat via chat_message_join:
+--
+--     INSERT INTO chat_message_join (chat_id, message_id)
+--       VALUES (<new_chat_rowid>, <every_fixture_message_rowid>);
+--
 -- Anchor message (already present in test.db):
 --   guid: 0355C6E1-D0C8-4212-AA87-DD8AE4FD1203
 --   body: "I'm going to try to eat as quick as possible and then come over"

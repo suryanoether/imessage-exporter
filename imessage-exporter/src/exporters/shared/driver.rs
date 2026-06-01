@@ -62,6 +62,44 @@ pub fn apply_body(msg: &mut Message, db: &Connection) {
     }
 }
 
+/// Per-file completeness summary surfaced at the top of each forensic
+/// export. Computed lazily when a chat file is opened; cheap because the
+/// query is a single `COUNT`/`MIN`/`MAX` against an indexed column.
+///
+/// `first_date` / `last_date` are raw iMessage timestamps (post-iOS 12
+/// nanoseconds since 2001-01-01 UTC); the formatter applies the export's
+/// `offset` and timezone before rendering.
+#[derive(Debug, Clone)]
+pub struct FileScope {
+    pub chat_id: i32,
+    pub message_count: i64,
+    pub first_date: Option<i64>,
+    pub last_date: Option<i64>,
+}
+
+/// Run the lightweight scope query for a single chat. Returns `None` on
+/// query failure so a missing chat row never blocks the export — the file
+/// just renders without a scope block.
+pub fn compute_file_scope(db: &Connection, chat_id: i32) -> Option<FileScope> {
+    let mut stmt = db
+        .prepare_cached(
+            "SELECT COUNT(*), MIN(m.date), MAX(m.date)
+             FROM message m
+             JOIN chat_message_join cmj ON m.rowid = cmj.message_id
+             WHERE cmj.chat_id = ?1",
+        )
+        .ok()?;
+    let row: (i64, Option<i64>, Option<i64>) = stmt
+        .query_row([chat_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .ok()?;
+    Some(FileScope {
+        chat_id,
+        message_count: row.0,
+        first_date: row.1,
+        last_date: row.2,
+    })
+}
+
 /// Format-specific hooks consumed by [`run_export`] and
 /// [`get_or_create_file_for`]. Implementers hold the [`&'a Config`] and an
 /// [`ExportState`], plus a small set of format-specific constants and
@@ -85,8 +123,15 @@ pub trait MessageWriter<'a>: MessageFormatter<'a> {
     /// Write a per-file header. Called once for the orphaned file at the
     /// start of [`run_export`] and once when each chat file is first opened
     /// (skipped if the file already exists on disk, to avoid duplicate
-    /// headers on group-name collisions). Return `Ok(())` to emit nothing.
-    fn write_file_header(file: &mut BufWriter<File>) -> Result<(), RuntimeError>;
+    /// headers on group-name collisions). `chat_id` is `None` for the
+    /// orphaned bucket; `config` lets the impl decide whether to render
+    /// forensic provenance and how to format timestamps. Return `Ok(())`
+    /// to emit nothing.
+    fn write_file_header(
+        file: &mut BufWriter<File>,
+        chat_id: Option<i32>,
+        config: &Config,
+    ) -> Result<(), RuntimeError>;
 
     /// Write a per-file footer. Called for every cached chat file and the
     /// orphaned file after iteration ends. Return `Ok(())` to emit nothing.
@@ -110,6 +155,7 @@ where
     let config = writer.config();
     match config.conversation(message) {
         Some((chatroom, _)) => {
+            let chat_id = message.chat_id;
             let filename = config.filename(chatroom);
             let state = writer.state_mut();
             match state.files.entry(filename) {
@@ -123,7 +169,7 @@ where
                     let file = File::options().append(true).create(true).open(&path)?;
                     let mut buf = BufWriter::new(file);
                     if !file_exists {
-                        W::write_file_header(&mut buf)?;
+                        W::write_file_header(&mut buf, chat_id, config)?;
                     }
                     Ok(entry.insert(buf))
                 }
@@ -150,7 +196,8 @@ where
         W::LABEL,
     );
 
-    W::write_file_header(&mut writer.state_mut().orphaned)?;
+    let config_for_header = writer.config();
+    W::write_file_header(&mut writer.state_mut().orphaned, None, config_for_header)?;
 
     let mut current_message_row = -1;
     let mut current_message = 0;
