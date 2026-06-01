@@ -709,10 +709,21 @@ fn query_forensic_extras(db: &rusqlite::Connection, msg_rowid: i32) -> ForensicE
          LEFT JOIN chat_recoverable_message_join crmj ON m.rowid = crmj.message_id
          WHERE m.rowid = ?1",
     );
-    let Ok(mut stmt) = stmt_result else {
-        return ForensicExtras::default();
+    let mut stmt = match stmt_result {
+        Ok(s) => s,
+        Err(why) => {
+            // The extras query failed to prepare. This means the strip
+            // for this and every subsequent message will be missing the
+            // handle / country / error / has_summary_info / recovered_at
+            // tokens. Announce once per message so the reviewer knows.
+            eprintln!(
+                "[forensic] query_forensic_extras prepare_cached failed for rowid={}: {:?}",
+                msg_rowid, why,
+            );
+            return ForensicExtras::default();
+        }
     };
-    stmt.query_row([msg_rowid], |r| {
+    match stmt.query_row([msg_rowid], |r| {
         let sender_handle: Option<String> = r.get::<_, Option<String>>(0).unwrap_or(None);
         let sender_country: Option<String> = r
             .get::<_, Option<String>>(1)
@@ -727,8 +738,16 @@ fn query_forensic_extras(db: &rusqlite::Connection, msg_rowid: i32) -> ForensicE
             has_summary_info: r.get::<_, i64>(3).unwrap_or(0) != 0,
             recovered_at: r.get::<_, Option<i64>>(4).unwrap_or(None).filter(|&d| d != 0),
         })
-    })
-    .unwrap_or_default()
+    }) {
+        Ok(extras) => extras,
+        Err(why) => {
+            eprintln!(
+                "[forensic] query_forensic_extras row fetch failed for rowid={}: {:?}",
+                msg_rowid, why,
+            );
+            ForensicExtras::default()
+        }
+    }
 }
 
 /// Truncate a message GUID for human-readable display in forensic-mode
@@ -781,12 +800,21 @@ impl HTML<'_> {
         // *something* — they can grep for the GUID separately.
         let orig_guid = reply.thread_originator_guid.as_deref()?;
         let orig_guid_owned = orig_guid.to_string();
-        let Ok(mut parent) =
-            Message::from_guid(orig_guid, self.config.data_source.db())
-        else {
+        let parent = Message::from_guid(orig_guid, self.config.data_source.db());
+        let Ok(mut parent) = parent else {
+            if self.config.options.forensic {
+                eprintln!(
+                    "[forensic] reply parent not in DB: reply rowid={} guid={} → parent_guid={}",
+                    reply.rowid, reply.guid, orig_guid_owned,
+                );
+            }
             return Some(ReplyingToVM {
                 sender: "(target not in source)".to_string(),
-                snippet: format!("[target guid: {}]", short_guid(&orig_guid_owned)),
+                snippet: format!(
+                    "[target guid: {} · part: {}]",
+                    short_guid(&orig_guid_owned),
+                    reply.thread_originator_part.as_deref().unwrap_or("?"),
+                ),
                 anchor_target: orig_guid_owned,
             });
         };
@@ -794,7 +822,7 @@ impl HTML<'_> {
         // (not the `text` column) and our snippet helper reads `text`
         // directly. Without this call, every snippet falls back to the
         // "[attachment]"/"[no preview]" placeholder.
-        apply_body(&mut parent, self.config.data_source.db());
+        apply_body(&mut parent, self.config.data_source.db(), self.config);
         let sender = self
             .config
             .who(
@@ -921,25 +949,47 @@ impl HTML<'_> {
         //   (2) Message::from_guid fails → target GUID was parsed but
         //       isn't in the DB (purged, in a different chat the export
         //       didn't touch, recoverable-deleted, etc.). We still
-        //       surface the GUID itself so the reviewer can see what
-        //       the tapback was attached to.
-        let (_idx, target_guid) = tapback_msg.clean_associated_guid()?;
+        //       surface the GUID + part index + associated_message_type
+        //       so the reviewer can see what the tapback was attached to.
+        let Some((idx, target_guid)) = tapback_msg.clean_associated_guid() else {
+            if self.config.options.forensic && tapback_msg.associated_message_guid.is_some() {
+                eprintln!(
+                    "[forensic] tapback with unparseable associated_message_guid: rowid={} guid={} raw={:?}",
+                    tapback_msg.rowid,
+                    tapback_msg.guid,
+                    tapback_msg.associated_message_guid,
+                );
+            }
+            return None;
+        };
         let target_guid_owned = target_guid.to_string();
-        let Ok(mut target) =
-            Message::from_guid(target_guid, self.config.data_source.db())
-        else {
+        let target = Message::from_guid(target_guid, self.config.data_source.db());
+        let Ok(mut target) = target else {
             // Fallback: target not in DB. Still surface the reference
             // header with the GUID + an explicit "(target not in source)"
             // marker so the reviewer knows the reference exists and where
             // it pointed.
+            if self.config.options.forensic {
+                eprintln!(
+                    "[forensic] tapback target not in DB: tapback rowid={} guid={} → target_guid={} associated_message_guid={:?}",
+                    tapback_msg.rowid,
+                    tapback_msg.guid,
+                    target_guid_owned,
+                    tapback_msg.associated_message_guid,
+                );
+            }
             return Some(InReactionToVM {
                 sender: "(target not in source)".to_string(),
-                snippet: format!("[target guid: {}]", short_guid(&target_guid_owned)),
+                snippet: format!(
+                    "[target guid: {} · part: {idx} · associated_type: {:?}]",
+                    short_guid(&target_guid_owned),
+                    tapback_msg.associated_message_type,
+                ),
                 anchor_target: target_guid_owned,
             });
         };
         // Snippet needs `text` materialized from the attributedBody blob.
-        apply_body(&mut target, self.config.data_source.db());
+        apply_body(&mut target, self.config.data_source.db(), self.config);
         let sender = self
             .config
             .who(

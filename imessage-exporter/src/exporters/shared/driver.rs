@@ -56,9 +56,21 @@ impl ExportState {
 /// `parse_body` failures are non-fatal: they leave the message's
 /// `components` empty, which downstream formatters already treat as
 /// "nothing to render".
-pub fn apply_body(msg: &mut Message, db: &Connection) {
-    if let Ok(body) = msg.parse_body(db) {
-        msg.apply_body(body);
+///
+/// In `--forensic` mode every parse failure is announced on stderr with
+/// the row's rowid + guid + reason so the reviewer can trace what
+/// content was hidden by an unparseable attributedBody. Default mode
+/// stays silent to keep stderr clean.
+pub fn apply_body(msg: &mut Message, db: &Connection, config: &Config) {
+    match msg.parse_body(db) {
+        Ok(body) => msg.apply_body(body),
+        Err(why) if config.options.forensic => {
+            eprintln!(
+                "[forensic] parse_body failed: rowid={} guid={} reason={:?}",
+                msg.rowid, msg.guid, why,
+            );
+        }
+        Err(_) => {}
     }
 }
 
@@ -219,17 +231,23 @@ where
     for message in Message::rows(&mut statement, [])? {
         let mut msg = message?;
 
+        let forensic = writer.config().options.forensic;
+
         // Early escape if we try and render the same message GUID twice
         // See https://github.com/ReagentX/imessage-exporter/issues/135
         if msg.rowid == current_message_row {
+            if forensic {
+                eprintln!(
+                    "[forensic] skipped duplicate rowid={} guid={} (deduplication for issue #135)",
+                    msg.rowid, msg.guid,
+                );
+            }
             current_message += 1;
             continue;
         }
         current_message_row = msg.rowid;
 
-        apply_body(&mut msg, writer.config().data_source.db());
-
-        let forensic = writer.config().options.forensic;
+        apply_body(&mut msg, writer.config().data_source.db(), writer.config());
 
         if msg.is_announcement() {
             msg_buf.clear();
@@ -244,7 +262,16 @@ where
         else if forensic && msg.is_tapback() {
             msg_buf.clear();
             let rendered = writer.format_tapback_bubble(&msg)?;
-            if !rendered.is_empty() {
+            if rendered.is_empty() {
+                // The bubble was deliberately empty: writer doesn't
+                // support a per-row tapback render (e.g. TXT) or the
+                // row's variant didn't match what is_tapback() implied.
+                // Announce so the row isn't silently lost.
+                eprintln!(
+                    "[forensic] tapback row produced no bubble: rowid={} guid={} associated_type={:?}",
+                    msg.rowid, msg.guid, msg.associated_message_type,
+                );
+            } else {
                 msg_buf.push_str(&rendered);
                 let file = get_or_create_file_for(writer, &msg)?;
                 file.write_all(msg_buf.as_bytes())?;
@@ -256,6 +283,15 @@ where
             writer.format_message_into(&msg, RenderContext::TopLevel, &mut msg_buf)?;
             let file = get_or_create_file_for(writer, &msg)?;
             file.write_all(msg_buf.as_bytes())?;
+        } else if forensic && (msg.is_poll_vote() || msg.is_poll_update()) {
+            // Poll vote / poll-update rows render under their parent
+            // poll. They're never lost in normal mode (they're attached
+            // to the poll), but in forensic mode the reviewer might
+            // want to know one was skipped at top level.
+            eprintln!(
+                "[forensic] skipped poll-vote/poll-update at top level (renders under parent): rowid={} guid={}",
+                msg.rowid, msg.guid,
+            );
         }
         current_message += 1;
         if current_message % 99 == 0 {

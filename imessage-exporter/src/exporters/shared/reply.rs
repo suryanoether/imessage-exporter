@@ -109,7 +109,7 @@ where
 
     let mut rendered = Vec::new();
     for reply in replies.iter_mut() {
-        apply_body(reply, formatter.config().data_source.db());
+        apply_body(reply, formatter.config().data_source.db(), formatter.config());
         if !reply.is_tapback() {
             let mut buf = String::with_capacity(buffer_capacity);
             formatter.format_message_into(reply, RenderContext::Reply, &mut buf)?;
