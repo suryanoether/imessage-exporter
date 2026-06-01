@@ -57,7 +57,12 @@ where
                 && let Ok(Some(translation)) = message.get_translation(config.data_source.db())
             {
                 let safe_translated = formatter.body_escape(&translation.translated_text);
-                formatter.body_text_translated(safe_translated, formatted_text)
+                let source_lang = config
+                    .options
+                    .forensic
+                    .then(|| translation.source_lang.clone())
+                    .filter(|s| !s.is_empty());
+                formatter.body_text_translated(safe_translated, formatted_text, source_lang)
             } else {
                 formatter.body_text_bubble(rewrite_fitness_receiver(formatted_text))
             }

@@ -22,10 +22,18 @@ impl<'a> TextEffectFormatter<'a> for HTML<'a> {
     }
 
     fn format_mention(&self, text: &str, mentioned: &str) -> String {
-        format!(
-            "<span title=\"{}\"><b>{text}</b></span>",
-            sanitize_html(mentioned)
-        )
+        // In forensic mode the mentioned-handle goes inline next to the
+        // mention text — hover-only `title=` is invisible on a printed
+        // court exhibit. Default mode keeps the existing title-attr
+        // behavior so golden-string tests stay green.
+        let safe_mentioned = sanitize_html(mentioned);
+        if self.config.options.forensic {
+            format!(
+                "<span class=\"mention\" title=\"{safe_mentioned}\"><b>{text}</b> <span class=\"mention_target\">({safe_mentioned})</span></span>",
+            )
+        } else {
+            format!("<span title=\"{safe_mentioned}\"><b>{text}</b></span>")
+        }
     }
 
     fn format_link(&self, text: &str, url: &str) -> String {

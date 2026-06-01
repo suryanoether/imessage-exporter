@@ -336,10 +336,16 @@ impl PartBodyBuilder for TXT<'_> {
         PartBody::Line { text: content }
     }
 
-    fn body_text_translated(&self, translated: String, original: String) -> Self::Body {
+    fn body_text_translated(
+        &self,
+        translated: String,
+        original: String,
+        source_lang: Option<String>,
+    ) -> Self::Body {
         PartBody::Translated {
             translated,
             original,
+            source_lang,
         }
     }
 

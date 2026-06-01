@@ -6,7 +6,10 @@ use imessage_database::{
     },
 };
 
-use crate::{app::runtime::Config, exporters::shared::time::format_message_date};
+use crate::{
+    app::runtime::Config,
+    exporters::shared::time::{format_message_date, format_message_date_with_tz},
+};
 
 /// Display name used in `ParticipantAdded` / `ParticipantRemoved`
 /// announcements when the handle can't be resolved.
@@ -74,7 +77,11 @@ pub fn resolve_announcement<'a>(
         who = config.options.custom_name.as_deref().unwrap_or(self_name);
     }
 
-    let timestamp = format_message_date(msg, config.offset);
+    let timestamp = if config.options.forensic {
+        format_message_date_with_tz(msg, config.offset)
+    } else {
+        format_message_date(msg, config.offset)
+    };
 
     let participant_name = match &announcement {
         Announcement::GroupAction(

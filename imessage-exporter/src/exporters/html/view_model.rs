@@ -408,6 +408,10 @@ pub(crate) enum PartBody {
     TextTranslated {
         translated: Html,
         original: Html,
+        /// Source language label rendered above the original text in
+        /// `--forensic` mode (e.g. "fr_FR"). `None` outside forensic so
+        /// default output stays byte-identical.
+        source_lang: Option<String>,
     },
     TextEdited {
         html: Html,

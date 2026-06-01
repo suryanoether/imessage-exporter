@@ -248,5 +248,6 @@ pub(crate) enum PartBody {
     Translated {
         translated: String,
         original: String,
+        source_lang: Option<String>,
     },
 }

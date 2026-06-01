@@ -169,7 +169,12 @@ pub(crate) trait PartBodyBuilder {
     /// Text content with no special formatting (e.g. a non-edited text part).
     fn body_text_bubble(&self, content: String) -> Self::Body;
     /// Translated text content
-    fn body_text_translated(&self, translated: String, original: String) -> Self::Body;
+    fn body_text_translated(
+        &self,
+        translated: String,
+        original: String,
+        source_lang: Option<String>,
+    ) -> Self::Body;
     /// Edited text content
     fn body_text_edited(&self, content: String) -> Self::Body;
     /// Attachment content, generally by reference to an external file

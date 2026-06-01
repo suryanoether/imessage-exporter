@@ -3,8 +3,8 @@
     {% match body -%}
     {%- when PartBody::Empty -%}
     {%- when PartBody::TextBubble { html } -%}<span class="bubble">{{ html|safe }}</span>
-    {% when PartBody::TextTranslated { translated, original } -%}<span class="bubble">{{ translated|safe }}</span>
-    <div class="translated"><span class="bubble">{{ original|safe }}</span></div>
+    {% when PartBody::TextTranslated { translated, original, source_lang } -%}<span class="bubble">{{ translated|safe }}</span>
+    <div class="translated"{% if let Some(lang) = source_lang %} data-source-lang="{{ lang }}"{% endif %}>{% if let Some(lang) = source_lang %}<span class="translation_source">source: {{ lang }}</span>{% endif %}<span class="bubble">{{ original|safe }}</span></div>
     {% when PartBody::TextEdited { html } -%}<div class="edited">{{ html|safe }}</div>
     {% when PartBody::Attachment { html } -%}<div class="attachment">{{ html|safe }}</div>
     {% when PartBody::AttachmentError { error } -%}<span class="attachment_error">Unable to locate attachment: {{

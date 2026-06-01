@@ -586,10 +586,16 @@ impl PartBodyBuilder for HTML<'_> {
         }
     }
 
-    fn body_text_translated(&self, translated: String, original: String) -> Self::Body {
+    fn body_text_translated(
+        &self,
+        translated: String,
+        original: String,
+        source_lang: Option<String>,
+    ) -> Self::Body {
         PartBody::TextTranslated {
             translated: Html::trust(translated),
             original: Html::trust(original),
+            source_lang,
         }
     }
 
@@ -5294,6 +5300,32 @@ mod forensic_integration_tests {
         assert!(
             !html.contains("class=\"forensic_scope\""),
             "default mode must not render a forensic_scope element",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_translated_message_surfaces_source_lang() {
+        // The fixture's last test.db message ("Oh, il a traduit ...") is
+        // translated. With --forensic the translation block must carry
+        // a `source: <lang>` label so the original language is visible
+        // on a printed exhibit.
+        let html = export_to_string("phase_e_translation", true);
+        assert!(
+            html.contains("class=\"translation_source\""),
+            "expected translation_source element in forensic mode, got: missing",
+        );
+        assert!(
+            html.contains("source: "),
+            "expected `source: <lang>` token in forensic translation block, got: missing",
+        );
+    }
+
+    #[test]
+    fn default_mode_translated_message_omits_source_lang_label() {
+        let html = export_to_string("default_translation_no_lang", false);
+        assert!(
+            !html.contains("class=\"translation_source\""),
+            "default mode must keep the translation block byte-identical to before, got: present",
         );
     }
 

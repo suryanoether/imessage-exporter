@@ -357,6 +357,22 @@ div.tapback {
     margin-left: 0.3em;
 }
 
+.mention_target {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85em;
+    opacity: 0.7;
+    font-weight: normal;
+}
+
+.translation_source {
+    display: block;
+    font-size: 0.7em;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+    margin-bottom: 0.1em;
+}
+
 .forensic_scope {
     margin: 1em 2vw;
     padding: 0.6em 0.9em;
