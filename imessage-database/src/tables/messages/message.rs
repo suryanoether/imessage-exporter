@@ -1110,6 +1110,16 @@ impl Message {
                 return Some((index, message_id.get(0..36)?));
             } else if guid.starts_with("bp:") {
                 return Some((0, guid.get(3..39)?));
+            } else if guid.starts_with("re:") {
+                // `re:GUID1:GUID2` — tapback on an edited message.
+                // `GUID1` is the message id, `GUID2` is the specific
+                // revision. Extract `GUID1` so the target message can be
+                // looked up; the revision discriminator is intentionally
+                // dropped here (callers that need it can inspect
+                // `associated_message_guid` directly). Without this branch
+                // the fallback path below would include the `re:` prefix in
+                // the returned id and lookup would always fail.
+                return Some((0, guid.get(3..39)?));
             }
 
             return Some((0, guid.get(0..36)?));

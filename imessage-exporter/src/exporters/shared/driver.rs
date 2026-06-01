@@ -7,9 +7,12 @@ use std::{
     io::{self, BufWriter, IsTerminal, Write},
 };
 
-use imessage_database::tables::{
-    messages::Message,
-    table::{ORPHANED, Table},
+use imessage_database::{
+    error::message::MessageError,
+    tables::{
+        messages::Message,
+        table::{ORPHANED, Table},
+    },
 };
 use rusqlite::Connection;
 
@@ -74,6 +77,12 @@ pub fn apply_body(msg: &mut Message, db: &Connection, config: &Config) -> bool {
             msg.apply_body(body);
             true
         }
+        // `NoText` is parse_body's signal for "row has no body content"
+        // (system events, group actions, empty rows, app messages without
+        // a caption). It's expected behavior, not a parse failure — the
+        // first end-to-end run reported tens of thousands of these
+        // legitimately-empty rows as if they were errors. Suppress.
+        Err(MessageError::NoText) => true,
         Err(why) => {
             if config.options.forensic {
                 eprintln!(
