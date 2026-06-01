@@ -138,6 +138,18 @@ INSERT INTO message (
 );
 
 -- -----------------------------------------------------------------------------
+-- (7) Relay-handle sender. A second handle whose `id` matches Apple's
+-- iCloud private-relay suffix (`*@privaterelay.appleid.com`) plus a
+-- message sent by it. Exercises the Hide-My-Email detection path.
+-- -----------------------------------------------------------------------------
+-- (8) Recoverable / "Recently Deleted" message. The row stays in `message`
+-- but its chat membership is in `chat_recoverable_message_join` (with a
+-- `delete_date` timestamp). Forensic mode renders a "RECOVERED" banner
+-- and surfaces the deletion time in the meta strip — court can see the
+-- content the sender tried to remove.
+-- -----------------------------------------------------------------------------
+
+-- -----------------------------------------------------------------------------
 -- (6) Edited regular message. date_edited != 0 so is_edited() returns true
 -- and the forensic_meta strip shows the "edited" flag.
 -- -----------------------------------------------------------------------------

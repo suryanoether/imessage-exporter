@@ -330,6 +330,7 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
         edited_message: &'a EditedMessage,
         message_part_idx: usize,
     ) -> Option<String> {
+        let forensic = self.config.options.forensic;
         let kind = normalize_edited(msg, edited_message, message_part_idx, self.config, YOU)?
             .map_rows(|event| {
                 let rendered_text =
@@ -338,10 +339,26 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
                     } else {
                         sanitize_html(event.text).into_owned()
                     };
-                let timestamp = match event.diff_since_previous {
-                    EditDiff::First => String::new(),
-                    EditDiff::Failed => "Edited later".to_string(),
-                    EditDiff::Computed(diff) => format!("Edited {diff} later"),
+                // Default mode: relative diff only (preserves existing
+                // golden-string tests). Forensic mode: absolute timestamp
+                // labelled per status, plus the relative diff in
+                // parentheses when one is available — so the reviewer
+                // sees both "when" and "how long after the prior edit".
+                let timestamp = if forensic {
+                    let absolute = format_timestamp_with_tz(event.date, self.config.offset);
+                    match &event.diff_since_previous {
+                        EditDiff::First => format!("Original at {absolute}"),
+                        EditDiff::Failed => format!("Edited at {absolute}"),
+                        EditDiff::Computed(diff) => {
+                            format!("Edited at {absolute} ({diff} later)")
+                        }
+                    }
+                } else {
+                    match &event.diff_since_previous {
+                        EditDiff::First => String::new(),
+                        EditDiff::Failed => "Edited later".to_string(),
+                        EditDiff::Computed(diff) => format!("Edited {diff} later"),
+                    }
                 };
                 EditedRow {
                     is_last: event.is_last,
@@ -513,6 +530,14 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
             .and_then(|e| e.sender_handle.as_deref())
             .filter(|h| *h != sender_display)
             .map(str::to_string);
+        let recovered_banner = extras.as_ref().and_then(|e| {
+            e.recovered_at.map(|d| {
+                Html::trust(format!(
+                    "<div class=\"recovered_banner\"><span class=\"recovered_label\">RECOVERED</span> sender unsent this message · deleted at: <span class=\"recovered_at\">{}</span></div>",
+                    sanitize_html(&format_timestamp_with_tz(d, self.config.offset)),
+                ))
+            })
+        });
         let forensic_meta = extras.map(|e| self.build_forensic_meta(message, &e));
 
         let vm = MessageVM {
@@ -525,7 +550,10 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
             read_after,
             reply_anchor,
             sender: sender_display,
-            is_deleted: message.is_deleted(),
+            // Suppress the legacy "This message was deleted" notice when
+            // we're going to render the richer forensic RECOVERED banner
+            // for the same row — they'd say the same thing twice.
+            is_deleted: message.is_deleted() && recovered_banner.is_none(),
             subject: message.subject.as_deref(),
             shareplay: message
                 .is_shareplay()
@@ -537,6 +565,7 @@ impl<'a> MessageFormatter<'a> for HTML<'a> {
             trailing_reply_context,
             forensic_meta,
             sender_handle_inline,
+            recovered_banner,
         };
         render_template_into(&vm, out);
         Ok(())
@@ -649,6 +678,11 @@ struct ForensicExtras {
     /// flagging presence here lets the reviewer know there's additional
     /// material in the source row.
     has_summary_info: bool,
+    /// `chat_recoverable_message_join.delete_date` for messages that the
+    /// sender unsent / soft-deleted. iMessage keeps these for ~30 days;
+    /// surfacing the timestamp lets the reviewer reason about when an
+    /// incriminating message was removed.
+    recovered_at: Option<i64>,
 }
 
 /// Suffix that identifies an iCloud Hide-My-Email / private relay
@@ -662,9 +696,11 @@ fn handle_is_relay(handle: &str) -> bool {
 fn query_forensic_extras(db: &rusqlite::Connection, msg_rowid: i32) -> ForensicExtras {
     let stmt_result = db.prepare_cached(
         "SELECT h.id, h.country, m.error,
-                CASE WHEN m.message_summary_info IS NOT NULL THEN 1 ELSE 0 END
+                CASE WHEN m.message_summary_info IS NOT NULL THEN 1 ELSE 0 END,
+                crmj.delete_date
          FROM message m
          LEFT JOIN handle h ON m.handle_id = h.rowid
+         LEFT JOIN chat_recoverable_message_join crmj ON m.rowid = crmj.message_id
          WHERE m.rowid = ?1",
     );
     let Ok(mut stmt) = stmt_result else {
@@ -676,15 +712,14 @@ fn query_forensic_extras(db: &rusqlite::Connection, msg_rowid: i32) -> ForensicE
             .get::<_, Option<String>>(1)
             .unwrap_or(None)
             .filter(|s| !s.is_empty());
-        let sender_uses_relay = sender_handle
-            .as_deref()
-            .is_some_and(handle_is_relay);
+        let sender_uses_relay = sender_handle.as_deref().is_some_and(handle_is_relay);
         Ok(ForensicExtras {
             sender_handle,
             sender_country,
             sender_uses_relay,
             error_code: r.get::<_, i32>(2).ok().filter(|&e| e != 0),
             has_summary_info: r.get::<_, i64>(3).unwrap_or(0) != 0,
+            recovered_at: r.get::<_, Option<i64>>(4).unwrap_or(None).filter(|&d| d != 0),
         })
     })
     .unwrap_or_default()
@@ -851,6 +886,12 @@ impl HTML<'_> {
         }
         if extras.has_summary_info {
             tokens.push("<span>has_summary_info</span>".to_string());
+        }
+        if let Some(d) = extras.recovered_at {
+            tokens.push(format!(
+                "<span class=\"forensic_meta_flag\">recovered_at: {}</span>",
+                sanitize_html(&format_timestamp_with_tz(d, self.config.offset)),
+            ));
         }
 
         let sep = " <span class=\"forensic_meta_sep\">·</span> ";
@@ -5005,6 +5046,160 @@ mod edited_tests {
 
         assert_eq!(actual, expected);
     }
+
+    #[test]
+    fn forensic_html_edited_history_shows_absolute_timestamps_per_row() {
+        // Phase D item 2: every edit revision must carry its absolute
+        // timestamp (+ TZ) so a reviewer can pin the moment "$50" became
+        // "$500", not just "10 seconds after the prior edit".
+        let mut options = Options::fake_options(Html);
+        options.forensic = true;
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488; // May 17, 2022 5:29:42 PM PDT
+        message.date_edited = 674530231992568192;
+        message.text = Some("$500".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+
+        // Original "$50" sent at 5:29:42 PM, edited to "$500" 10 seconds later.
+        message.edited_parts = Some(EditedMessage {
+            parts: vec![EditedMessagePart {
+                status: EditStatus::Edited,
+                edit_history: vec![
+                    EditedEvent {
+                        date: 758573156000000000, // arbitrary; absolute formatter just uses what we pass
+                        text: Some("$50".to_string()),
+                        components: vec![BubbleComponent::Text(vec![TextAttributes {
+                            start: 0,
+                            end: 3,
+                            effects: vec![TextEffect::Default],
+                        }])],
+                        guid: None,
+                    },
+                    EditedEvent {
+                        date: 758573166000000000,
+                        text: Some("$500".to_string()),
+                        components: vec![BubbleComponent::Text(vec![TextAttributes {
+                            start: 0,
+                            end: 4,
+                            effects: vec![TextEffect::Default],
+                        }])],
+                        guid: None,
+                    },
+                ],
+            }],
+        });
+        message.components = vec![BubbleComponent::Text(vec![TextAttributes::new(
+            0,
+            4,
+            vec![TextEffect::Default],
+        )])];
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+
+        // The original row gets the explicit "Original at <ts>" prefix
+        assert!(
+            actual.contains("Original at "),
+            "expected explicit `Original at <ts>` on first row, got: {actual}",
+        );
+        // The edit row carries an absolute timestamp AND the relative diff
+        assert!(
+            actual.contains("Edited at "),
+            "expected `Edited at <ts>` on subsequent rows, got: {actual}",
+        );
+        assert!(
+            actual.contains("(10 seconds later)"),
+            "forensic edit rows must keep the diff in parens, got: {actual}",
+        );
+        // The PRE-EDIT text must still appear in the export — that's the
+        // entire forensic point. Without this the reviewer never sees
+        // what the message *was*.
+        assert!(
+            actual.contains("$50"),
+            "pre-edit text must appear in forensic edit history, got: {actual}",
+        );
+        assert!(
+            actual.contains("$500"),
+            "post-edit (current) text must appear in forensic edit history, got: {actual}",
+        );
+        // Each timestamp must carry the TZ abbreviation (PST/PDT)
+        assert!(
+            actual.contains(" PST") || actual.contains(" PDT"),
+            "edit-row timestamps must include the TZ abbreviation, got: {actual}",
+        );
+    }
+
+    #[test]
+    fn default_html_edited_history_keeps_legacy_relative_format() {
+        // Phase D item 2 regression guard: default exports must keep
+        // emitting "Edited 10 seconds later" without absolute timestamps,
+        // so existing golden-string tests stay green.
+        let options = Options::fake_options(Html);
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.date = 674526582885055488;
+        message.date_edited = 674530231992568192;
+        message.text = Some("$500".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+        message.edited_parts = Some(EditedMessage {
+            parts: vec![EditedMessagePart {
+                status: EditStatus::Edited,
+                edit_history: vec![
+                    EditedEvent {
+                        date: 758573156000000000,
+                        text: Some("$50".to_string()),
+                        components: vec![BubbleComponent::Text(vec![TextAttributes {
+                            start: 0,
+                            end: 3,
+                            effects: vec![TextEffect::Default],
+                        }])],
+                        guid: None,
+                    },
+                    EditedEvent {
+                        date: 758573166000000000,
+                        text: Some("$500".to_string()),
+                        components: vec![BubbleComponent::Text(vec![TextAttributes {
+                            start: 0,
+                            end: 4,
+                            effects: vec![TextEffect::Default],
+                        }])],
+                        guid: None,
+                    },
+                ],
+            }],
+        });
+        message.components = vec![BubbleComponent::Text(vec![TextAttributes::new(
+            0,
+            4,
+            vec![TextEffect::Default],
+        )])];
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+        assert!(
+            actual.contains("Edited 10 seconds later"),
+            "default mode keeps the relative format, got: {actual}",
+        );
+        assert!(
+            !actual.contains("Original at "),
+            "default mode must not introduce the forensic `Original at` prefix, got: {actual}",
+        );
+        assert!(
+            !actual.contains("Edited at "),
+            "default mode must not introduce the forensic absolute timestamp, got: {actual}",
+        );
+    }
 }
 
 // MARK: Forensic integration tests
@@ -5099,6 +5294,61 @@ mod forensic_integration_tests {
         assert!(
             !html.contains("class=\"forensic_scope\""),
             "default mode must not render a forensic_scope element",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_renders_recovered_banner_for_unsent_message() {
+        let html = export_to_string("phase_d_recovered", true);
+        // Locate the recoverable message's bubble and confirm its banner.
+        let needle = "id=\"F0R3N51C-0008-RECVRD-MSGS-FFF\"";
+        let start = html.find(needle).expect("recovered message bubble present");
+        let tail = &html[start..];
+        let bubble_end = tail.find("</div>\n</div>").unwrap_or(tail.len());
+        let bubble = &tail[..bubble_end];
+        assert!(
+            bubble.contains("class=\"recovered_banner\""),
+            "recovered message must carry the recovered_banner, got: {bubble}",
+        );
+        assert!(
+            bubble.contains("RECOVERED"),
+            "recovered banner must include the RECOVERED label, got: {bubble}",
+        );
+        assert!(
+            bubble.contains("deleted at:"),
+            "recovered banner must include the deletion timestamp label, got: {bubble}",
+        );
+        // The legacy "This message was deleted" notice must be suppressed
+        // (otherwise the same point is rendered twice).
+        assert!(
+            !bubble.contains("This message was deleted from the conversation"),
+            "legacy deleted notice must be suppressed when recovered_banner fires, got: {bubble}",
+        );
+        // Body content must still render — the unsent text is the very
+        // thing a court wants to see.
+        assert!(
+            bubble.contains("this was unsent later"),
+            "recovered message body must still render, got: {bubble}",
+        );
+        // Forensic_meta must also carry the recovered_at flag for cite.
+        assert!(
+            bubble.contains("recovered_at:"),
+            "forensic_meta must surface recovered_at on this row, got: {bubble}",
+        );
+    }
+
+    #[test]
+    fn forensic_full_pipeline_does_not_render_recovered_banner_on_normal_messages() {
+        let html = export_to_string("phase_d_no_recovered", true);
+        // Check a normal (non-recovered) bubble — must not carry the banner.
+        let needle = "id=\"FAKEGUID-D0C8-4212-AA87-DD8AE4FD1203\"";
+        let start = html.find(needle).expect("normal message present");
+        let tail = &html[start..];
+        let bubble_end = tail.find("</div>\n</div>").unwrap_or(tail.len());
+        let bubble = &tail[..bubble_end];
+        assert!(
+            !bubble.contains("recovered_banner"),
+            "non-recovered messages must not render the recovered banner, got: {bubble}",
         );
     }
 

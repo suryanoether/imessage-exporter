@@ -339,6 +339,11 @@ pub(super) struct MessageVM<'a> {
     /// under multiple addresses across the conversation, every message
     /// shows which one was used.
     pub sender_handle_inline: Option<String>,
+    /// "RECOVERED" banner rendered above the body when the message was
+    /// soft-deleted via Apple's Recently Deleted feature and the
+    /// `chat_recoverable_message_join` row was preserved. `None` for
+    /// non-recovered messages and outside forensic mode.
+    pub recovered_banner: Option<Html>,
     /// True for `<div class="sent {service}">`, false for `<div class="received">`.
     pub is_from_me: bool,
     pub service: Service<'a>,
