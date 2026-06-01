@@ -319,6 +319,28 @@ div.tapback {
     text-decoration: line-through;
 }
 
+/* Stream-level skip placeholder: a row from the source DB that the
+   streaming loop didn't render (duplicate rowid, empty tapback bubble,
+   poll vote/update at top level). Loud enough to spot in a long
+   transcript, quiet enough not to drown out real messages. */
+.forensic_skip {
+    margin: 0.4em 2vw;
+    padding: 0.3em 0.6em;
+    border: 1px dotted var(--muted-text);
+    border-radius: 0.3em;
+    background: rgba(128, 128, 128, 0.05);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75em;
+    color: var(--muted-text);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.forensic_skip p {
+    margin: 0;
+    word-break: break-all;
+}
+
 .recovered_banner {
     margin: 0.3em 0 0.4em 0;
     padding: 0.3em 0.6em;

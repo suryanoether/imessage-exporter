@@ -130,6 +130,24 @@ impl<'a> MessageWriter<'a> for HTML<'a> {
     fn footer_notice() -> Option<&'static str> {
         Some("Writing HTML footers...")
     }
+
+    fn write_skip_marker(
+        file: &mut BufWriter<File>,
+        reason: &str,
+        msg: &Message,
+    ) -> Result<(), RuntimeError> {
+        // Inline placeholder so the row appears at its true position in
+        // the transcript instead of just disappearing. Reason + rowid +
+        // guid are enough to chase the row in the source DB.
+        let marker = format!(
+            "<div class=\"forensic_skip\"><p>SKIPPED · {reason} · rowid={rowid} · guid={guid}</p></div>\n",
+            reason = sanitize_html(reason),
+            rowid = msg.rowid,
+            guid = sanitize_html(&msg.guid),
+        );
+        file.write_all(marker.as_bytes())?;
+        Ok(())
+    }
 }
 
 // MARK: Writer
@@ -901,6 +919,13 @@ impl HTML<'_> {
         }
 
         // Flags ------------------------------------------------------------
+        if self
+            .state
+            .forensic_parse_failures
+            .contains(&message.rowid)
+        {
+            tokens.push("<span class=\"fmf\">body_parse_failed</span>".to_string());
+        }
         if message.is_edited() {
             tokens.push("<span class=\"fmf\">edited</span>".to_string());
         }
@@ -1501,6 +1526,49 @@ mod tests {
         let expected = "<div class=\"message\">\n    <div class=\"sent iMessage\">\n        <p>\n            <span class=\"timestamp\">\n                <a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=PLAIN-GUID\">May 17, 2022  5:29:42 PM</a>\n                \n            </span>\n            \n            <span class=\"sender\">Me</span>\n        </p>\n        \n        \n        \n        \n        \n        <hr>\n<div class=\"message_part\">\n    <span class=\"bubble\">hello</span>\n    </div>\n\n        \n        \n    </div>\n</div>\n";
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn html_skip_marker_carries_reason_and_identifiers() {
+        use std::io::Write;
+        let options = Options::fake_options(ExportType::Html);
+        let config = Config::fake_app(options);
+        let _ = HTML::new(&config).unwrap();
+
+        let path = std::env::temp_dir().join("html_skip_marker_test.html");
+        let _ = std::fs::remove_file(&path);
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut buf = std::io::BufWriter::new(file);
+            let mut msg = Config::fake_message();
+            msg.rowid = 12345;
+            msg.guid = "SKIP-GUID-TEST".to_string();
+            <HTML as crate::exporters::shared::driver::MessageWriter>::write_skip_marker(
+                &mut buf,
+                "duplicate rowid (#135 dedup)",
+                &msg,
+            )
+            .unwrap();
+            buf.flush().unwrap();
+        }
+        let rendered = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            rendered.contains("class=\"forensic_skip\""),
+            "expected forensic_skip wrapper, got: {rendered}",
+        );
+        assert!(
+            rendered.contains("duplicate rowid (#135 dedup)"),
+            "expected reason text, got: {rendered}",
+        );
+        assert!(
+            rendered.contains("rowid=12345"),
+            "expected rowid token, got: {rendered}",
+        );
+        assert!(
+            rendered.contains("guid=SKIP-GUID-TEST"),
+            "expected guid token, got: {rendered}",
+        );
     }
 
     #[test]

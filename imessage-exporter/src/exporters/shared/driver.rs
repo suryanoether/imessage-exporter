@@ -30,6 +30,12 @@ pub struct ExportState {
     pub orphaned: BufWriter<File>,
     /// Drives the on-screen progress indicator.
     pub pb: ExportProgress,
+    /// Rowids whose `parse_body` returned `Err` during the streaming
+    /// loop. Renderers consult this so the per-message forensic_meta
+    /// strip can flag rows whose body content couldn't be parsed —
+    /// a row with an empty body becomes self-explaining instead of
+    /// looking like a normal empty message.
+    pub forensic_parse_failures: std::collections::HashSet<i32>,
 }
 
 impl ExportState {
@@ -48,6 +54,7 @@ impl ExportState {
             files: HashMap::new(),
             orphaned: BufWriter::new(file),
             pb: ExportProgress::new(pb_enabled),
+            forensic_parse_failures: std::collections::HashSet::new(),
         })
     }
 }
@@ -61,16 +68,21 @@ impl ExportState {
 /// the row's rowid + guid + reason so the reviewer can trace what
 /// content was hidden by an unparseable attributedBody. Default mode
 /// stays silent to keep stderr clean.
-pub fn apply_body(msg: &mut Message, db: &Connection, config: &Config) {
+pub fn apply_body(msg: &mut Message, db: &Connection, config: &Config) -> bool {
     match msg.parse_body(db) {
-        Ok(body) => msg.apply_body(body),
-        Err(why) if config.options.forensic => {
-            eprintln!(
-                "[forensic] parse_body failed: rowid={} guid={} reason={:?}",
-                msg.rowid, msg.guid, why,
-            );
+        Ok(body) => {
+            msg.apply_body(body);
+            true
         }
-        Err(_) => {}
+        Err(why) => {
+            if config.options.forensic {
+                eprintln!(
+                    "[forensic] parse_body failed: rowid={} guid={} reason={:?}",
+                    msg.rowid, msg.guid, why,
+                );
+            }
+            false
+        }
     }
 }
 
@@ -152,6 +164,22 @@ pub trait MessageWriter<'a>: MessageFormatter<'a> {
     /// Optional notice printed once before per-file footers are written.
     /// Return `None` to suppress the notice.
     fn footer_notice() -> Option<&'static str>;
+
+    /// Emit a visible placeholder for a row in the source DB that the
+    /// streaming loop didn't render — duplicate rowid dedup, empty
+    /// tapback bubble, poll vote/update at top level, etc. Called only
+    /// in `--forensic` mode so default exports stay byte-identical.
+    /// `reason` is a short human-readable label (e.g. "duplicate rowid
+    /// (#135 dedup)"). Implementations that don't have a visible
+    /// placeholder format may no-op.
+    fn write_skip_marker(
+        file: &mut BufWriter<File>,
+        reason: &str,
+        msg: &Message,
+    ) -> Result<(), RuntimeError> {
+        let _ = (file, reason, msg);
+        Ok(())
+    }
 }
 
 /// Resolve the `BufWriter` for `message`, creating the chat file (and writing
@@ -241,13 +269,18 @@ where
                     "[forensic] skipped duplicate rowid={} guid={} (deduplication for issue #135)",
                     msg.rowid, msg.guid,
                 );
+                let file = get_or_create_file_for(writer, &msg)?;
+                W::write_skip_marker(file, "duplicate rowid (#135 dedup)", &msg)?;
             }
             current_message += 1;
             continue;
         }
         current_message_row = msg.rowid;
 
-        apply_body(&mut msg, writer.config().data_source.db(), writer.config());
+        let body_ok = apply_body(&mut msg, writer.config().data_source.db(), writer.config());
+        if !body_ok && forensic {
+            writer.state_mut().forensic_parse_failures.insert(msg.rowid);
+        }
 
         if msg.is_announcement() {
             msg_buf.clear();
@@ -266,11 +299,12 @@ where
                 // The bubble was deliberately empty: writer doesn't
                 // support a per-row tapback render (e.g. TXT) or the
                 // row's variant didn't match what is_tapback() implied.
-                // Announce so the row isn't silently lost.
                 eprintln!(
                     "[forensic] tapback row produced no bubble: rowid={} guid={} associated_type={:?}",
                     msg.rowid, msg.guid, msg.associated_message_type,
                 );
+                let file = get_or_create_file_for(writer, &msg)?;
+                W::write_skip_marker(file, "tapback row without bubble", &msg)?;
             } else {
                 msg_buf.push_str(&rendered);
                 let file = get_or_create_file_for(writer, &msg)?;
@@ -285,13 +319,14 @@ where
             file.write_all(msg_buf.as_bytes())?;
         } else if forensic && (msg.is_poll_vote() || msg.is_poll_update()) {
             // Poll vote / poll-update rows render under their parent
-            // poll. They're never lost in normal mode (they're attached
-            // to the poll), but in forensic mode the reviewer might
-            // want to know one was skipped at top level.
+            // poll. The reviewer should still see the row was here.
             eprintln!(
                 "[forensic] skipped poll-vote/poll-update at top level (renders under parent): rowid={} guid={}",
                 msg.rowid, msg.guid,
             );
+            let kind = if msg.is_poll_vote() { "poll vote" } else { "poll update" };
+            let file = get_or_create_file_for(writer, &msg)?;
+            W::write_skip_marker(file, &format!("{kind} at top level (renders under parent)"), &msg)?;
         }
         current_message += 1;
         if current_message % 99 == 0 {
