@@ -248,12 +248,27 @@ impl Options {
             );
         }
 
-        // Determine the attachment manager mode
+        // Determine the attachment manager mode.
+        //
+        // For `--forensic` exports the default flips from `disabled` to
+        // `clone`: a forensic export with broken image references isn't
+        // forensically useful. `clone` copies attachments byte-for-byte
+        // without converting (no HEIC→JPEG, no transcoding), which is
+        // both the fastest mode and the one a reviewer can hash-verify
+        // against the source. The reviewer can still explicitly suppress
+        // attachment copying with `-c disabled` if they have a reason
+        // (e.g. running diagnostics).
         let attachment_manager_mode = match attachment_manager_type {
             Some(manager) => {
                 AttachmentManagerMode::from_cli(manager).ok_or(RuntimeError::InvalidOptions(format!(
                     "{manager} is not a valid attachment manager mode! Must be one of <{SUPPORTED_ATTACHMENT_MANAGER_MODES}>"
                 )))?
+            }
+            None if forensic => {
+                eprintln!(
+                    "Forensic mode: attachments will be copied (`-c clone` default). Pass `-c disabled` to suppress."
+                );
+                AttachmentManagerMode::Clone
             }
             None => AttachmentManagerMode::default(),
         };
@@ -485,7 +500,7 @@ fn get_command() -> Command {
         .arg(
             Arg::new(OPTION_FORENSIC)
                 .long(OPTION_FORENSIC)
-                .help("Render forensic detail on tapbacks\nIncludes the timestamp of each tapback and surfaces tapback removal events\n(`<kind> removed by <who>` with the removal timestamp). Default exports hide\nremovals because they overlap with the addition record they cancelled.\n")
+                .help("Render court-review forensic detail throughout the export\nEvery message bubble carries a metadata strip (guid, rowid, chat,\nservice, handle, delivered, read, etc.). Tapbacks render as timeline\nbubbles instead of inline annotations; replies dedupe; recovered\n(\"unsent\") messages render with a RECOVERED banner; timestamps include\nthe timezone abbreviation. Sender identity nuances (country, iCloud\nrelay) are surfaced when present.\n\nForensic mode also flips the default --copy-method from `disabled` to\n`clone` so attachments come along with the export — a forensic\ntranscript with broken image references isn't forensically useful.\nPass `-c disabled` to suppress attachment copying explicitly.\n")
                 .action(ArgAction::SetTrue)
                 .display_order(17),
         )
