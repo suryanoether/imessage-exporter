@@ -8,9 +8,10 @@ use crate::{
     },
 };
 
-/// Maximum character length of a reply-context snippet before it gets
-/// truncated. Keep aligned with how much fits on one rendered line.
-const REPLY_SNIPPET_MAX_CHARS: usize = 80;
+/// Maximum character length of a reply / in-reaction-to snippet before
+/// it gets truncated. Set high enough to keep typical messages intact —
+/// short text fits, only genuinely long messages get the ellipsis.
+const REPLY_SNIPPET_MAX_CHARS: usize = 256;
 
 /// Build a short, single-line preview of the message being replied to. The
 /// caller is responsible for HTML-escaping the result.

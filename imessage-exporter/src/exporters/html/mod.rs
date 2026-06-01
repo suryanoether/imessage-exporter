@@ -116,7 +116,7 @@ impl<'a> MessageWriter<'a> for HTML<'a> {
             && let Some(cid) = chat_id
             && let Some(scope) = compute_file_scope(config.data_source.db(), cid)
         {
-            let html = render_forensic_scope(&scope, config);
+            let html = render_export_summary(&scope, config);
             file.write_all(html.as_bytes())?;
         }
         Ok(())
@@ -744,11 +744,11 @@ fn short_guid(guid: &str) -> String {
     }
 }
 
-/// Render the per-chat forensic provenance banner that appears at the top
-/// of every HTML file in `--forensic` mode. Inlined HTML (no askama
-/// template) so it stays a single contained function — the layout is
-/// small and won't grow with messages.
-fn render_forensic_scope(scope: &FileScope, config: &Config) -> String {
+/// Per-chat banner emitted at the top of every HTML file in
+/// `--forensic` mode. Describes what's in the file (chat id, message
+/// count from source DB, date bounds) so a reviewer can spot
+/// export-side gaps. Inlined HTML to keep the layout self-contained.
+fn render_export_summary(scope: &FileScope, config: &Config) -> String {
     let first = scope
         .first_date
         .map(|d| format_timestamp_with_tz(d, config.offset))
@@ -758,8 +758,8 @@ fn render_forensic_scope(scope: &FileScope, config: &Config) -> String {
         .map(|d| format_timestamp_with_tz(d, config.offset))
         .unwrap_or_else(|| "—".to_string());
     format!(
-        "<header class=\"forensic_scope\">\n\
-         <p><strong>Forensic scope.</strong> chat: {chat} · messages in source DB: {count} · first: {first} · last: {last}</p>\n\
+        "<header class=\"export_summary\">\n\
+         <p>chat: {chat} · messages in source DB: {count} · first: {first} · last: {last}</p>\n\
          </header>\n",
         chat = scope.chat_id,
         count = scope.message_count,
@@ -774,8 +774,22 @@ impl HTML<'_> {
     /// reply is an orphan) so the caller can render the reply without a
     /// quote header rather than dropping it.
     fn resolve_replying_to(&self, reply: &Message) -> Option<ReplyingToVM> {
+        // Same fallback contract as `resolve_in_reaction_to`: if the
+        // parent GUID can't be loaded (purged, outside this export's
+        // chat scope, recoverable-deleted, etc.), still surface the
+        // reference so the reviewer sees that the reply pointed at
+        // *something* — they can grep for the GUID separately.
         let orig_guid = reply.thread_originator_guid.as_deref()?;
-        let mut parent = Message::from_guid(orig_guid, self.config.data_source.db()).ok()?;
+        let orig_guid_owned = orig_guid.to_string();
+        let Ok(mut parent) =
+            Message::from_guid(orig_guid, self.config.data_source.db())
+        else {
+            return Some(ReplyingToVM {
+                sender: "(target not in source)".to_string(),
+                snippet: format!("[target guid: {}]", short_guid(&orig_guid_owned)),
+                anchor_target: orig_guid_owned,
+            });
+        };
         // iMessage typically stores message text in the attributedBody blob
         // (not the `text` column) and our snippet helper reads `text`
         // directly. Without this call, every snippet falls back to the
@@ -798,9 +812,11 @@ impl HTML<'_> {
 
     /// Build the per-message forensic metadata strip rendered at the
     /// bottom of every bubble in `--forensic` mode. Assembled as a single
-    /// pre-escaped HTML line of `·`-separated tokens. Untracked
-    /// timestamps (`date_read == 0`) are rendered as `not recorded` so
-    /// absence is positively acknowledged rather than ambiguous.
+    /// pre-escaped HTML line of plain `·`-separated tokens — flag tokens
+    /// (edited, error, relay_address, recovered_at) get `<span class="fmf">`
+    /// for the bold/uppercase treatment, plain tokens emit no markup
+    /// beyond their text. This is the bulk of the per-message byte cost,
+    /// so wrapper-element economy matters here.
     ///
     /// `extras` is queried once per message by the caller and reused
     /// for the inline sender-handle label too.
@@ -809,101 +825,79 @@ impl HTML<'_> {
 
         // Identity ---------------------------------------------------------
         tokens.push(format!(
-            "<span class=\"forensic_meta_guid\">guid: {}</span>",
+            "guid: {}",
             sanitize_html(&short_guid(&message.guid)),
         ));
-        tokens.push(format!("<span>rowid: {}</span>", message.rowid));
+        tokens.push(format!("rowid: {}", message.rowid));
         if let Some(c) = message.chat_id {
-            tokens.push(format!("<span>chat: {c}</span>"));
+            tokens.push(format!("chat: {c}"));
         }
         if let Some(service) = message.service.as_deref() {
-            tokens.push(format!(
-                "<span>service: {}</span>",
-                sanitize_html(service),
-            ));
+            tokens.push(format!("service: {}", sanitize_html(service)));
         }
         if let Some(handle) = extras.sender_handle.as_deref() {
-            tokens.push(format!(
-                "<span>handle: {}</span>",
-                sanitize_html(handle),
-            ));
+            tokens.push(format!("handle: {}", sanitize_html(handle)));
         }
         if let Some(country) = extras.sender_country.as_deref() {
-            tokens.push(format!(
-                "<span>country: {}</span>",
-                sanitize_html(country),
-            ));
+            tokens.push(format!("country: {}", sanitize_html(country)));
         }
         if extras.sender_uses_relay {
-            tokens.push(
-                "<span class=\"forensic_meta_flag\">relay_address</span>".to_string(),
-            );
+            tokens.push("<span class=\"fmf\">relay_address</span>".to_string());
         }
         if let Some(addr) = message.destination_caller_id.as_deref() {
-            tokens.push(format!(
-                "<span>addressed_to: {}</span>",
-                sanitize_html(addr),
-            ));
+            tokens.push(format!("addressed_to: {}", sanitize_html(addr)));
         }
 
         // Temporal ---------------------------------------------------------
         if message.date_delivered != 0 {
             tokens.push(format!(
-                "<span>delivered: {}</span>",
+                "delivered: {}",
                 sanitize_html(&format_timestamp_with_tz(
                     message.date_delivered,
                     self.config.offset,
                 )),
             ));
         } else if message.is_from_me() {
-            // For sent messages, the absence is meaningful (not delivered
-            // or RR disabled) — call it out.
-            tokens.push("<span>delivered: not recorded</span>".to_string());
+            tokens.push("delivered: not recorded".to_string());
         }
         if message.date_read != 0 {
             tokens.push(format!(
-                "<span>read: {}</span>",
+                "read: {}",
                 sanitize_html(&format_timestamp_with_tz(
                     message.date_read,
                     self.config.offset,
                 )),
             ));
         } else {
-            // Always emit "read: not recorded" so a zero is unambiguous
-            // (could be unread OR read-receipts disabled). Never silently
-            // omit.
-            tokens.push("<span>read: not recorded</span>".to_string());
+            tokens.push("read: not recorded".to_string());
         }
 
         // Flags ------------------------------------------------------------
         if message.is_edited() {
-            tokens.push("<span class=\"forensic_meta_flag\">edited</span>".to_string());
+            tokens.push("<span class=\"fmf\">edited</span>".to_string());
         }
         if message.is_deleted() {
-            tokens.push("<span class=\"forensic_meta_flag\">deleted</span>".to_string());
+            tokens.push("<span class=\"fmf\">deleted</span>".to_string());
         }
         if let Some(d) = message.deleted_from {
-            tokens.push(format!("<span>deleted_from: {d}</span>"));
+            tokens.push(format!("deleted_from: {d}"));
         }
         if let Some(err) = extras.error_code {
-            tokens.push(format!(
-                "<span class=\"forensic_meta_flag\">error: {err}</span>",
-            ));
+            tokens.push(format!("<span class=\"fmf\">error: {err}</span>"));
         }
         if extras.has_summary_info {
-            tokens.push("<span>has_summary_info</span>".to_string());
+            tokens.push("has_summary_info".to_string());
         }
         if let Some(d) = extras.recovered_at {
             tokens.push(format!(
-                "<span class=\"forensic_meta_flag\">recovered_at: {}</span>",
+                "<span class=\"fmf\">recovered_at: {}</span>",
                 sanitize_html(&format_timestamp_with_tz(d, self.config.offset)),
             ));
         }
 
-        let sep = " <span class=\"forensic_meta_sep\">·</span> ";
         let line = format!(
-            "<p class=\"forensic_meta\">{}</p>",
-            tokens.join(sep),
+            "<p class=\"fm\">{}</p>",
+            tokens.join(" · "),
         );
         ForensicMetaVM {
             line_html: Html::trust(line),
@@ -916,10 +910,35 @@ impl HTML<'_> {
     /// database (filtered out, recently-deleted, or unparseable
     /// `associated_message_guid`).
     fn resolve_in_reaction_to(&self, tapback_msg: &Message) -> Option<InReactionToVM> {
+        // We deliberately want the header to render in *every* case where
+        // a tapback has an associated GUID — even when the target row
+        // can't be loaded — so a reviewer never sees a tapback whose
+        // origin is silently omitted. Two failure modes are handled
+        // explicitly:
+        //   (1) clean_associated_guid returns None → the row's
+        //       associated_message_guid is null or unparseable. There's
+        //       genuinely no target to reference; return None.
+        //   (2) Message::from_guid fails → target GUID was parsed but
+        //       isn't in the DB (purged, in a different chat the export
+        //       didn't touch, recoverable-deleted, etc.). We still
+        //       surface the GUID itself so the reviewer can see what
+        //       the tapback was attached to.
         let (_idx, target_guid) = tapback_msg.clean_associated_guid()?;
-        let mut target = Message::from_guid(target_guid, self.config.data_source.db()).ok()?;
-        // Same reason as `resolve_replying_to`: snippet needs `text`
-        // materialized from the attributedBody blob.
+        let target_guid_owned = target_guid.to_string();
+        let Ok(mut target) =
+            Message::from_guid(target_guid, self.config.data_source.db())
+        else {
+            // Fallback: target not in DB. Still surface the reference
+            // header with the GUID + an explicit "(target not in source)"
+            // marker so the reviewer knows the reference exists and where
+            // it pointed.
+            return Some(InReactionToVM {
+                sender: "(target not in source)".to_string(),
+                snippet: format!("[target guid: {}]", short_guid(&target_guid_owned)),
+                anchor_target: target_guid_owned,
+            });
+        };
+        // Snippet needs `text` materialized from the attributedBody blob.
         apply_body(&mut target, self.config.data_source.db());
         let sender = self
             .config
@@ -1546,7 +1565,13 @@ mod tests {
     }
 
     #[test]
-    fn forensic_html_tapback_bubble_missing_target_omits_reference_header() {
+    fn forensic_html_tapback_bubble_missing_target_renders_fallback_reference() {
+        // Renamed from `..._omits_reference_header`. Behavior changed
+        // after real-world feedback: silently omitting the reference
+        // header on orphan tapbacks made some reactions look untethered.
+        // The fallback now renders a visible "(target not in source)"
+        // marker carrying the target GUID, so the reviewer always knows
+        // *something* was reacted to and can chase the GUID separately.
         let mut options = Options::fake_options(ExportType::Html);
         options.forensic = true;
         let mut config = Config::fake_app(options);
@@ -1560,13 +1585,22 @@ mod tests {
         message.date = 674526582885055488;
         message.guid = "ORPHAN-TAPBACK-GUID".to_string();
         message.associated_message_type = Some(2000); // Added Loved
-        message.associated_message_guid = Some("p:0/MISSING-TARGET-GUID-XXXXXXXXXXXXXXXX".to_string());
+        message.associated_message_guid =
+            Some("p:0/MISSING-TARGET-GUID-XXXXXXXXXXXXXXXX".to_string());
         message.handle_id = Some(999999);
 
         let actual = exporter.format_tapback_bubble(&message).unwrap();
         assert!(
-            !actual.contains("in_reaction_to"),
-            "orphan tapback bubble should omit reference header, got: {actual}",
+            actual.contains("class=\"in_reaction_to\""),
+            "orphan tapback should now carry the fallback reference header, got: {actual}",
+        );
+        assert!(
+            actual.contains("(target not in source)"),
+            "fallback header must declare the target wasn't found, got: {actual}",
+        );
+        assert!(
+            actual.contains("[target guid: MISSING-"),
+            "fallback header must include the truncated target GUID, got: {actual}",
         );
         // Bubble still renders so the row isn't lost
         assert!(
@@ -1657,7 +1691,7 @@ mod tests {
 
         // The strip must include every captured field
         assert!(
-            actual.contains("class=\"forensic_meta\""),
+            actual.contains("class=\"fm\""),
             "expected forensic_meta strip in output, got: {actual}",
         );
         assert!(
@@ -1867,7 +1901,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            actual.contains("class=\"forensic_meta\""),
+            actual.contains("class=\"fm\""),
             "expected forensic_meta strip to render even when timestamps are zero, got: {actual}",
         );
         assert!(
@@ -1912,7 +1946,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            !actual.contains("forensic_meta"),
+            !actual.contains("class=\"fm\""),
             "default mode must not render the forensic metadata strip, got: {actual}",
         );
     }
@@ -2013,9 +2047,12 @@ mod tests {
     }
 
     #[test]
-    fn forensic_html_reply_top_level_with_missing_parent_renders_without_quote_header() {
-        // GUID is not in the fixture db; resolve_replying_to returns None
-        // and the reply must still render (no quote header, no crash).
+    fn forensic_html_reply_top_level_with_missing_parent_renders_fallback_reference() {
+        // Renamed from `..._renders_without_quote_header`. After the
+        // tapback-side fix surfaced this same issue on replies, the
+        // resolve_replying_to fallback now renders a visible
+        // "(target not in source)" reference instead of silently
+        // omitting the quote header.
         let mut options = Options::fake_options(ExportType::Html);
         options.forensic = true;
         let config = Config::fake_app(options);
@@ -2043,8 +2080,12 @@ mod tests {
             "expected forensic top-level id=guid even for orphans, got: {actual}",
         );
         assert!(
-            !actual.contains("replying_to"),
-            "no replying_to header when parent is missing, got: {actual}",
+            actual.contains("class=\"replying_to\""),
+            "fallback replying_to header must render when parent is missing, got: {actual}",
+        );
+        assert!(
+            actual.contains("(target not in source)"),
+            "fallback must declare the parent wasn't found in source, got: {actual}",
         );
         assert!(
             actual.contains("got it"),
@@ -5275,8 +5316,8 @@ mod forensic_integration_tests {
     fn forensic_full_pipeline_renders_scope_header_on_chat_file() {
         let html = export_to_string("scope_header", true);
         assert!(
-            html.contains("class=\"forensic_scope\""),
-            "expected forensic_scope header in chat file",
+            html.contains("class=\"export_summary\""),
+            "expected export_summary header in chat file",
         );
         assert!(
             html.contains("messages in source DB:"),
@@ -5295,11 +5336,11 @@ mod forensic_integration_tests {
     #[test]
     fn default_mode_no_scope_header() {
         let html = export_to_string("default_no_scope", false);
-        // The CSS block always contains `.forensic_scope` selectors. Test
+        // The CSS block always contains `.export_summary` selectors. Test
         // that the *rendered element* is absent, not the selector text.
         assert!(
-            !html.contains("class=\"forensic_scope\""),
-            "default mode must not render a forensic_scope element",
+            !html.contains("class=\"export_summary\""),
+            "default mode must not render an export_summary element",
         );
     }
 
@@ -5459,7 +5500,7 @@ mod forensic_integration_tests {
     fn forensic_full_pipeline_renders_meta_strip_on_messages() {
         let html = export_to_string("meta_strip", true);
         assert!(
-            html.contains("class=\"forensic_meta\""),
+            html.contains("class=\"fm\""),
             "expected forensic_meta strip in output",
         );
     }
@@ -5573,22 +5614,25 @@ mod forensic_integration_tests {
     }
 
     #[test]
-    fn forensic_full_pipeline_renders_orphan_tapback_without_in_reaction_to() {
+    fn forensic_full_pipeline_renders_orphan_tapback_with_fallback_reference() {
+        // Renamed from `..._without_in_reaction_to`. Behavior changed
+        // after a real-data report that orphan tapbacks looked
+        // untethered; the fallback now renders the target GUID + a
+        // "(target not in source)" marker so the reviewer can see what
+        // was reacted to even when the target row isn't in this export.
         let html = export_to_string("orphan_tapback", true);
-        assert!(
-            html.contains("id=\"F0R3N51C-0005-LOVE-ORPH-EDFFFFFFFFFF\""),
-            "expected orphan-tapback bubble to render even when target is missing",
-        );
-        // Scope the in_reaction_to check to the orphan's bubble only — other
-        // tapbacks in the same export legitimately have headers.
         let needle = "id=\"F0R3N51C-0005-LOVE-ORPH-EDFFFFFFFFFF\"";
         let start = html.find(needle).expect("orphan bubble anchor present");
         let tail = &html[start..];
         let bubble_end = tail.find("</div></div>").unwrap_or(tail.len());
         let bubble = &tail[..bubble_end];
         assert!(
-            !bubble.contains("in_reaction_to"),
-            "orphan tapback bubble must omit in_reaction_to header, got: {bubble}",
+            bubble.contains("class=\"in_reaction_to\""),
+            "orphan tapback should now carry a fallback reference header, got: {bubble}",
+        );
+        assert!(
+            bubble.contains("(target not in source)"),
+            "fallback must declare the target wasn't found, got: {bubble}",
         );
     }
 

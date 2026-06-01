@@ -373,7 +373,7 @@ div.tapback {
     margin-bottom: 0.1em;
 }
 
-.forensic_scope {
+.export_summary {
     margin: 1em 2vw;
     padding: 0.6em 0.9em;
     border: 1px solid var(--muted-text);
@@ -384,34 +384,27 @@ div.tapback {
     color: var(--muted-text);
 }
 
-.forensic_scope p {
+.export_summary p {
     margin: 0;
 }
 
-.forensic_scope strong {
-    color: inherit;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    font-weight: bold;
-    margin-right: 0.4em;
-}
-
-.forensic_meta {
+/* Per-message metadata strip ("fm") sits inside the bubble so its text
+   color has to track the bubble's text color: white on sent (green/blue
+   backgrounds), black on received (gray background). dimgray was
+   unreadable on the sent bubbles. Using `currentColor` + opacity keeps
+   it legible on both. */
+.fm {
     margin: 0.3em 0 0 0;
     padding-top: 0.25em;
-    border-top: 1px dotted var(--muted-text);
+    border-top: 1px dotted currentColor;
     font-size: 0.7em;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: var(--muted-text);
+    color: inherit;
+    opacity: 0.7;
     word-break: break-all;
 }
 
-.forensic_meta_sep {
-    opacity: 0.6;
-    padding: 0 0.15em;
-}
-
-.forensic_meta_flag {
+.fmf {
     font-weight: bold;
     text-transform: uppercase;
     letter-spacing: 0.05em;
