@@ -10,8 +10,8 @@
     </{% if row.is_last %}tfoot{% else %}tbody{% endif %}>
     {%- endfor -%}
 </table>
-{%- when Edit::Unsent { who, elapsed } -%}
-<span class="unsent">{{ who }} unsent this message part
+{%- when Edit::Unsent { who, elapsed, part_idx } -%}
+<span class="unsent">{{ who }} unsent message part #{{ part_idx }}
     {%- if let Some(elapsed) = elapsed %} {{ elapsed }} after sending{% endif -%}
     !</span>
 {%- endmatch -%}

@@ -771,6 +771,46 @@ fn query_forensic_extras(db: &rusqlite::Connection, msg_rowid: i32) -> ForensicE
 /// Truncate a message GUID for human-readable display in forensic-mode
 /// tapback bubbles. Keeps the leading segment plus an ellipsis so the
 /// bubble stays compact while remaining greppable against the full id.
+/// Distinguish "row not in the message table at all" from "row is in
+/// the table but `Message::from_guid` failed to parse it." The
+/// streaming parser swallows any `from_row` failure as `Err`, so the
+/// caller sees both cases identically — but the *cause* is completely
+/// different (data gap vs. code bug / NULL in a required column), and
+/// the fallback rendering should say so.
+///
+/// On query failure we report `QueryFailed` rather than guessing; the
+/// caller's existing "not in source" wording is the safe default.
+#[derive(Debug, Clone, Copy)]
+enum GuidPresence {
+    /// The guid is present in the `message` table (COUNT > 0).
+    InTable,
+    /// The guid is genuinely not in the `message` table.
+    Absent,
+    /// The disambiguation query itself failed.
+    QueryFailed,
+}
+
+impl std::fmt::Display for GuidPresence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GuidPresence::InTable => write!(f, "row in table but unparseable"),
+            GuidPresence::Absent => write!(f, "not in source DB"),
+            GuidPresence::QueryFailed => write!(f, "presence check failed"),
+        }
+    }
+}
+
+fn guid_presence(db: &rusqlite::Connection, guid: &str) -> GuidPresence {
+    let Ok(mut stmt) = db.prepare_cached("SELECT COUNT(*) FROM message WHERE guid = ?1") else {
+        return GuidPresence::QueryFailed;
+    };
+    match stmt.query_row([guid], |r| r.get::<_, i64>(0)) {
+        Ok(0) => GuidPresence::Absent,
+        Ok(_) => GuidPresence::InTable,
+        Err(_) => GuidPresence::QueryFailed,
+    }
+}
+
 /// Translate a tapback row's `associated_message_type` integer into the
 /// human-readable reaction label, e.g. "Laughed Removed" instead of
 /// the raw `Some(3003)` debug output. Falls back to the numeric code
@@ -840,14 +880,23 @@ impl HTML<'_> {
         let orig_guid_owned = orig_guid.to_string();
         let parent = Message::from_guid(orig_guid, self.config.data_source.db());
         let Ok(mut parent) = parent else {
+            // Same disambiguation as the tapback path: is the parent
+            // row absent or unparseable? COUNT(*) tells us cheaply.
+            let presence = guid_presence(self.config.data_source.db(), &orig_guid_owned);
+            let fallback_sender = match presence {
+                GuidPresence::InTable => "(target row unparseable)".to_string(),
+                GuidPresence::Absent | GuidPresence::QueryFailed => {
+                    "(target not in source)".to_string()
+                }
+            };
             if self.config.options.forensic {
                 eprintln!(
-                    "[forensic] reply parent not in DB: reply rowid={} guid={} → parent_guid={}",
+                    "[forensic] reply parent {presence}: reply rowid={} guid={} → parent_guid={}",
                     reply.rowid, reply.guid, orig_guid_owned,
                 );
             }
             return Some(ReplyingToVM {
-                sender: "(target not in source)".to_string(),
+                sender: fallback_sender,
                 snippet: format!(
                     "[target guid: {} · part: {}]",
                     short_guid(&orig_guid_owned),
@@ -1015,13 +1064,20 @@ impl HTML<'_> {
         let reaction_label = describe_tapback(tapback_msg);
         let target = Message::from_guid(target_guid, self.config.data_source.db());
         let Ok(mut target) = target else {
-            // Fallback: target not in DB. Still surface the reference
-            // header with the GUID + an explicit "(target not in source)"
-            // marker so the reviewer knows the reference exists and where
-            // it pointed.
+            // Disambiguate: is the row genuinely absent from the message
+            // table, or is it there but failing to parse (NULL value in a
+            // required column, etc.)? A cheap COUNT query distinguishes
+            // and gives the reviewer + us a real clue.
+            let presence = guid_presence(self.config.data_source.db(), target_guid);
+            let fallback_sender = match presence {
+                GuidPresence::InTable => "(target row unparseable)".to_string(),
+                GuidPresence::Absent | GuidPresence::QueryFailed => {
+                    "(target not in source)".to_string()
+                }
+            };
             if self.config.options.forensic {
                 eprintln!(
-                    "[forensic] tapback target not in DB: tapback rowid={} guid={} reaction={reaction_label} → target_guid={} associated_message_guid={}",
+                    "[forensic] tapback target {presence}: tapback rowid={} guid={} reaction={reaction_label} → target_guid={} associated_message_guid={}",
                     tapback_msg.rowid,
                     tapback_msg.guid,
                     target_guid_owned,
@@ -1029,7 +1085,7 @@ impl HTML<'_> {
                 );
             }
             return Some(InReactionToVM {
-                sender: "(target not in source)".to_string(),
+                sender: fallback_sender,
                 snippet: format!(
                     "[target guid: {} · part: {idx} · reaction: {reaction_label}]",
                     short_guid(&target_guid_owned),
@@ -5164,7 +5220,7 @@ mod edited_tests {
         exporter
             .format_message_into(&message, RenderContext::TopLevel, &mut actual)
             .unwrap();
-        let expected = "<div class=\"message\">\n    <div class=\"sent iMessage\">\n        <p>\n            <span class=\"timestamp\">\n                <a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a>\n                \n            </span>\n            \n            <span class=\"sender\">Me</span>\n        </p>\n        \n        \n        \n        \n        \n        <hr>\n<div class=\"message_part\">\n    <span class=\"bubble\">From arbitrary byte stream:\r</span>\n    </div>\n\n        \n        <hr>\n<div class=\"message_part\">\n    <span class=\"attachment_error\">Attachment does not exist!</span>\n    </div>\n\n        \n        <hr>\n<div class=\"message_part\">\n    <span class=\"bubble\">To native Rust data structures:\r</span>\n    </div>\n\n        \n        <hr>\n<div class=\"message_part\">\n    <span class=\"unsent\"><span class=\"unsent\">You unsent this message part 1 hour, 49 seconds after sending!</span></span>\n    </div>\n\n        \n        \n    </div>\n</div>\n";
+        let expected = "<div class=\"message\">\n    <div class=\"sent iMessage\">\n        <p>\n            <span class=\"timestamp\">\n                <a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a>\n                \n            </span>\n            \n            <span class=\"sender\">Me</span>\n        </p>\n        \n        \n        \n        \n        \n        <hr>\n<div class=\"message_part\">\n    <span class=\"bubble\">From arbitrary byte stream:\r</span>\n    </div>\n\n        \n        <hr>\n<div class=\"message_part\">\n    <span class=\"attachment_error\">Attachment does not exist!</span>\n    </div>\n\n        \n        <hr>\n<div class=\"message_part\">\n    <span class=\"bubble\">To native Rust data structures:\r</span>\n    </div>\n\n        \n        <hr>\n<div class=\"message_part\">\n    <span class=\"unsent\"><span class=\"unsent\">You unsent message part #3 1 hour, 49 seconds after sending!</span></span>\n    </div>\n\n        \n        \n    </div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }

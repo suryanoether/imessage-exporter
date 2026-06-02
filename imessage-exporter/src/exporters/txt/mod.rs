@@ -3107,7 +3107,7 @@ mod edited_tests {
         exporter
             .format_message_into(&message, RenderContext::TopLevel, &mut actual)
             .unwrap();
-        let expected = "May 17, 2022  5:29:42 PM\nMe\nFrom arbitrary byte stream:\r\nAttachment missing!\nTo native Rust data structures:\r\nYou unsent this message part 1 hour, 49 seconds after sending!\n\n";
+        let expected = "May 17, 2022  5:29:42 PM\nMe\nFrom arbitrary byte stream:\r\nAttachment missing!\nTo native Rust data structures:\r\nYou unsent message part #3 1 hour, 49 seconds after sending!\n\n";
 
         assert_eq!(actual, expected);
     }
@@ -3143,7 +3143,7 @@ mod edited_tests {
         exporter
             .format_message_into(&message, RenderContext::TopLevel, &mut actual)
             .unwrap();
-        let expected = "May 17, 2022  5:29:42 PM\nSample Contact\nSample Contact unsent this message part 1 hour, 49 seconds after sending!\n\n";
+        let expected = "May 17, 2022  5:29:42 PM\nSample Contact\nSample Contact unsent message part #0 1 hour, 49 seconds after sending!\n\n";
 
         assert_eq!(actual, expected);
     }

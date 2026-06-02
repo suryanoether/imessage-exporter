@@ -2,5 +2,5 @@
 {%- when Edit::Edited { rows } -%}
 {% for row in rows %}{{ row.timestamp_prefix }}{{ row.text }}
 {% endfor -%}
-{%- when Edit::Unsent { who, elapsed } -%}{{ who }} unsent this message part{% if let Some(elapsed) = elapsed %} {{ elapsed }} after sending{% endif %}!
+{%- when Edit::Unsent { who, elapsed, part_idx } -%}{{ who }} unsent message part #{{ part_idx }}{% if let Some(elapsed) = elapsed %} {{ elapsed }} after sending{% endif %}!
 {%- endmatch -%}

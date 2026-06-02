@@ -18,10 +18,14 @@ pub enum Edit<'a, R> {
     },
     /// `elapsed` carries the human-readable duration between send and unsend
     /// (e.g. `"49 seconds"`) when both timestamps are available;
-    /// `None` falls back to a duration-less phrasing.
+    /// `None` falls back to a duration-less phrasing. `part_idx` is the
+    /// 0-based index of the message part that was unsent — surfaced so
+    /// the rendered text can say "part #2" instead of the ambiguous
+    /// "this message part" when the message has multiple parts.
     Unsent {
         who: &'a str,
         elapsed: Option<String>,
+        part_idx: usize,
     },
 }
 
@@ -34,7 +38,7 @@ impl<'a, R> Edit<'a, R> {
             Edit::Edited { rows } => Edit::Edited {
                 rows: rows.into_iter().map(f).collect(),
             },
-            Edit::Unsent { who, elapsed } => Edit::Unsent { who, elapsed },
+            Edit::Unsent { who, elapsed, part_idx } => Edit::Unsent { who, elapsed, part_idx },
         }
     }
 }
@@ -154,7 +158,11 @@ pub fn normalize_edited<'a>(
                 .zip(msg.date_edited(config.offset).ok())
                 .and_then(|(s, e)| readable_diff(&s, &e));
             let who = resolve_unsent_actor(msg, config, self_name);
-            Some(Edit::Unsent { who, elapsed })
+            Some(Edit::Unsent {
+                who,
+                elapsed,
+                part_idx,
+            })
         }
     }
 }
