@@ -64,6 +64,45 @@ pub struct Config {
     pub data_source: DataSource,
 }
 
+/// Emit a quick source-DB profile to stderr in `--forensic` mode so a
+/// reviewer can see the universe the export was drawn from. Lets them
+/// compare expected vs. actual without guessing.
+fn print_source_db_profile(db: &rusqlite::Connection) {
+    let count_of = |sql: &str| -> Option<i64> {
+        db.prepare(sql).ok()?.query_row([], |r| r.get(0)).ok()
+    };
+    let total = count_of("SELECT COUNT(*) FROM message");
+    let tapbacks = count_of(
+        "SELECT COUNT(*) FROM message WHERE associated_message_guid IS NOT NULL",
+    );
+    let replies = count_of("SELECT COUNT(*) FROM message WHERE thread_originator_guid IS NOT NULL");
+    let cmj = count_of("SELECT COUNT(*) FROM chat_message_join");
+    let crmj =
+        count_of("SELECT COUNT(*) FROM chat_recoverable_message_join").unwrap_or(0);
+    let (min_date, max_date): (Option<i64>, Option<i64>) = db
+        .prepare("SELECT MIN(date), MAX(date) FROM message")
+        .ok()
+        .and_then(|mut s| {
+            s.query_row([], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)))
+                .ok()
+        })
+        .unwrap_or((None, None));
+    let fmt_date = |d: Option<i64>| -> String {
+        d.map(|raw| {
+            crate::exporters::shared::time::format_timestamp_with_tz(raw, get_offset())
+        })
+        .unwrap_or_else(|| "—".to_string())
+    };
+    eprintln!("[forensic] source DB profile:");
+    eprintln!("  total messages:                {}", total.map(|v| v.to_string()).unwrap_or_else(|| "?".into()));
+    eprintln!("  tapback rows:                  {}", tapbacks.map(|v| v.to_string()).unwrap_or_else(|| "?".into()));
+    eprintln!("  reply rows:                    {}", replies.map(|v| v.to_string()).unwrap_or_else(|| "?".into()));
+    eprintln!("  chat_message_join rows:        {}", cmj.map(|v| v.to_string()).unwrap_or_else(|| "?".into()));
+    eprintln!("  recoverable (unsent) rows:     {crmj}");
+    eprintln!("  earliest message date:         {}", fmt_date(min_date));
+    eprintln!("  latest message date:           {}", fmt_date(max_date));
+}
+
 impl Config {
     /// Get the chatroom and its deduplicated ID for a message, if available
     pub fn conversation(&self, message: &Message) -> Option<(&Chat, &i32)> {
@@ -252,6 +291,16 @@ impl Config {
         // Translations are not available in older database versions, so we default to an empty set
         let translated_messages = Message::cache_translations(data_source.db()).unwrap_or_default();
         eprintln!("Cache built!");
+
+        // In forensic mode, dump a short source-DB profile so the
+        // reviewer sees at a glance what the export is going to draw
+        // from: total messages, tapback rows, reply rows, recoverable
+        // rows, the chat-message-join row count, the message date
+        // range. Lets us compare "messages in source" against
+        // "messages I expected to see" without guessing.
+        if options.forensic {
+            print_source_db_profile(data_source.db());
+        }
 
         Ok(Config {
             chatrooms,

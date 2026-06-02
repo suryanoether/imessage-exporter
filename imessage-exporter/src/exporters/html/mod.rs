@@ -811,6 +811,37 @@ fn guid_presence(db: &rusqlite::Connection, guid: &str) -> GuidPresence {
     }
 }
 
+/// Look up a message by GUID, tolerating casing differences. The
+/// canonical `Message::from_guid` does exact-match WHERE m.guid = ?
+/// against SQLite's default BINARY collation; if iMessage stored the
+/// `message.guid` and a tapback's `associated_message_guid` in different
+/// cases (rare but observable in older / migrated DBs), the lookup
+/// silently fails on a row that's right there.
+///
+/// Returns `(message, matched_via_case_insensitive)` — the second bool is
+/// true when the exact-case match failed but the COLLATE NOCASE retry
+/// succeeded. Used to detect and log the casing-mismatch case.
+fn find_message_by_guid_tolerant(
+    db: &rusqlite::Connection,
+    guid: &str,
+) -> Option<(Message, bool)> {
+    // Fast path: exact match (BINARY collation).
+    if let Ok(msg) = Message::from_guid(guid, db) {
+        return Some((msg, false));
+    }
+    // Fallback: resolve the actual stored casing, then re-query with
+    // the canonical Message::from_guid so the row is loaded through
+    // the regular path (cached statement, full COLS list).
+    let Ok(mut stmt) =
+        db.prepare_cached("SELECT guid FROM message WHERE guid = ?1 COLLATE NOCASE LIMIT 1")
+    else {
+        return None;
+    };
+    let stored_guid: String = stmt.query_row([guid], |r| r.get(0)).ok()?;
+    let msg = Message::from_guid(&stored_guid, db).ok()?;
+    Some((msg, true))
+}
+
 /// Translate a tapback row's `associated_message_type` integer into the
 /// human-readable reaction label, e.g. "Laughed Removed" instead of
 /// the raw `Some(3003)` debug output. Falls back to the numeric code
@@ -878,8 +909,8 @@ impl HTML<'_> {
         // *something* — they can grep for the GUID separately.
         let orig_guid = reply.thread_originator_guid.as_deref()?;
         let orig_guid_owned = orig_guid.to_string();
-        let parent = Message::from_guid(orig_guid, self.config.data_source.db());
-        let Ok(mut parent) = parent else {
+        let lookup = find_message_by_guid_tolerant(self.config.data_source.db(), orig_guid);
+        let Some((mut parent, case_insensitive)) = lookup else {
             // Same disambiguation as the tapback path: is the parent
             // row absent or unparseable? COUNT(*) tells us cheaply.
             let presence = guid_presence(self.config.data_source.db(), &orig_guid_owned);
@@ -905,6 +936,12 @@ impl HTML<'_> {
                 anchor_target: orig_guid_owned,
             });
         };
+        if case_insensitive && self.config.options.forensic {
+            eprintln!(
+                "[forensic] reply parent matched only via case-insensitive guid: reply rowid={} guid={} → parent_guid_requested={} parent_guid_stored={}",
+                reply.rowid, reply.guid, orig_guid_owned, parent.guid,
+            );
+        }
         // iMessage typically stores message text in the attributedBody blob
         // (not the `text` column) and our snippet helper reads `text`
         // directly. Without this call, every snippet falls back to the
@@ -1062,8 +1099,9 @@ impl HTML<'_> {
         // stderr log use the same wording. "Some(3003)" is Debug
         // output of an Option<i32> — useless to a court reviewer.
         let reaction_label = describe_tapback(tapback_msg);
-        let target = Message::from_guid(target_guid, self.config.data_source.db());
-        let Ok(mut target) = target else {
+        let lookup =
+            find_message_by_guid_tolerant(self.config.data_source.db(), target_guid);
+        let Some((mut target, case_insensitive)) = lookup else {
             // Disambiguate: is the row genuinely absent from the message
             // table, or is it there but failing to parse (NULL value in a
             // required column, etc.)? A cheap COUNT query distinguishes
@@ -1093,6 +1131,12 @@ impl HTML<'_> {
                 anchor_target: target_guid_owned,
             });
         };
+        if case_insensitive && self.config.options.forensic {
+            eprintln!(
+                "[forensic] tapback target matched only via case-insensitive guid: tapback rowid={} guid={} → target_guid_requested={} target_guid_stored={}",
+                tapback_msg.rowid, tapback_msg.guid, target_guid_owned, target.guid,
+            );
+        }
         // Snippet needs `text` materialized from the attributedBody blob.
         apply_body(&mut target, self.config.data_source.db(), self.config);
         let sender = self
