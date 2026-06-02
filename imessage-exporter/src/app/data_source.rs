@@ -7,6 +7,7 @@ use rusqlite::Connection;
 use crate::app::{
     compatibility::backup::{
         decrypt_backup, get_decrypted_contacts_database, get_decrypted_message_database,
+        stage_unencrypted_ios_db,
     },
     contacts::{ContactsIndex, DEFAULT_PATH_IOS},
     error::RuntimeError,
@@ -75,7 +76,14 @@ impl DataSource {
                     })
                 }
                 None => {
-                    let messages_path = options.get_db_path();
+                    // Unencrypted iOS backup: copy main DB + WAL + SHM
+                    // sidecars to a temp dir so SQLite finds them under
+                    // the conventional `.db` / `.db-wal` / `.db-shm`
+                    // names. Reading `<backup>/3d/3d0d7e5f...` directly
+                    // misses the WAL (which lives at a different file id)
+                    // and silently drops any messages iOS hadn't
+                    // checkpointed at backup time.
+                    let messages_path = stage_unencrypted_ios_db(&options.db_path)?;
                     let contacts_index =
                         Self::get_contacts_index(Some(&options.db_path.join(DEFAULT_PATH_IOS)))
                             .unwrap_or_default();
