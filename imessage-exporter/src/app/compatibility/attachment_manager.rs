@@ -133,6 +133,15 @@ impl AttachmentManager {
         attachment: &'a mut Attachment,
         config: &Config,
     ) -> Option<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+        // Every call to handle_attachment corresponds to one attachment
+        // reference in the source DB. Track it once so the summary's
+        // "attachments referenced" count is accurate even when the mode
+        // is `Disabled`.
+        config
+            .forensic_counters
+            .attachments_referenced
+            .fetch_add(1, Relaxed);
         if !matches!(self.mode, AttachmentManagerMode::Disabled) {
             // Resolve the path to the attachment
             let attachment_path = attachment.resolved_attachment_path(
@@ -165,6 +174,10 @@ impl AttachmentManager {
 
             // Ensure the file exists at the specified location
             if !from.exists() {
+                config
+                    .forensic_counters
+                    .attachments_file_not_found
+                    .fetch_add(1, Relaxed);
                 eprintln!("Attachment not found at specified path: {}", from.display());
                 return None;
             }

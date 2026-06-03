@@ -911,12 +911,18 @@ impl HTML<'_> {
         let orig_guid_owned = orig_guid.to_string();
         let lookup = find_message_by_guid_tolerant(self.config.data_source.db(), orig_guid);
         let Some((mut parent, case_insensitive)) = lookup else {
+            use std::sync::atomic::Ordering::Relaxed;
             // Same disambiguation as the tapback path: is the parent
             // row absent or unparseable? COUNT(*) tells us cheaply.
             let presence = guid_presence(self.config.data_source.db(), &orig_guid_owned);
+            let counters = &self.config.forensic_counters;
             let fallback_sender = match presence {
-                GuidPresence::InTable => "(target row unparseable)".to_string(),
+                GuidPresence::InTable => {
+                    counters.reply_parents_unparseable.fetch_add(1, Relaxed);
+                    "(target row unparseable)".to_string()
+                }
                 GuidPresence::Absent | GuidPresence::QueryFailed => {
+                    counters.reply_parents_missing.fetch_add(1, Relaxed);
                     "(target not in source)".to_string()
                 }
             };
@@ -936,11 +942,18 @@ impl HTML<'_> {
                 anchor_target: orig_guid_owned,
             });
         };
-        if case_insensitive && self.config.options.forensic {
-            eprintln!(
-                "[forensic] reply parent matched only via case-insensitive guid: reply rowid={} guid={} → parent_guid_requested={} parent_guid_stored={}",
-                reply.rowid, reply.guid, orig_guid_owned, parent.guid,
-            );
+        if case_insensitive {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.config
+                .forensic_counters
+                .reply_parents_case_insensitive
+                .fetch_add(1, Relaxed);
+            if self.config.options.forensic {
+                eprintln!(
+                    "[forensic] reply parent matched only via case-insensitive guid: reply rowid={} guid={} → parent_guid_requested={} parent_guid_stored={}",
+                    reply.rowid, reply.guid, orig_guid_owned, parent.guid,
+                );
+            }
         }
         // iMessage typically stores message text in the attributedBody blob
         // (not the `text` column) and our snippet helper reads `text`
@@ -1102,14 +1115,20 @@ impl HTML<'_> {
         let lookup =
             find_message_by_guid_tolerant(self.config.data_source.db(), target_guid);
         let Some((mut target, case_insensitive)) = lookup else {
+            use std::sync::atomic::Ordering::Relaxed;
             // Disambiguate: is the row genuinely absent from the message
             // table, or is it there but failing to parse (NULL value in a
             // required column, etc.)? A cheap COUNT query distinguishes
             // and gives the reviewer + us a real clue.
             let presence = guid_presence(self.config.data_source.db(), target_guid);
+            let counters = &self.config.forensic_counters;
             let fallback_sender = match presence {
-                GuidPresence::InTable => "(target row unparseable)".to_string(),
+                GuidPresence::InTable => {
+                    counters.tapback_targets_unparseable.fetch_add(1, Relaxed);
+                    "(target row unparseable)".to_string()
+                }
                 GuidPresence::Absent | GuidPresence::QueryFailed => {
+                    counters.tapback_targets_missing.fetch_add(1, Relaxed);
                     "(target not in source)".to_string()
                 }
             };
@@ -1131,11 +1150,18 @@ impl HTML<'_> {
                 anchor_target: target_guid_owned,
             });
         };
-        if case_insensitive && self.config.options.forensic {
-            eprintln!(
-                "[forensic] tapback target matched only via case-insensitive guid: tapback rowid={} guid={} → target_guid_requested={} target_guid_stored={}",
-                tapback_msg.rowid, tapback_msg.guid, target_guid_owned, target.guid,
-            );
+        if case_insensitive {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.config
+                .forensic_counters
+                .tapback_targets_case_insensitive
+                .fetch_add(1, Relaxed);
+            if self.config.options.forensic {
+                eprintln!(
+                    "[forensic] tapback target matched only via case-insensitive guid: tapback rowid={} guid={} → target_guid_requested={} target_guid_stored={}",
+                    tapback_msg.rowid, tapback_msg.guid, target_guid_owned, target.guid,
+                );
+            }
         }
         // Snippet needs `text` materialized from the attributedBody blob.
         apply_body(&mut target, self.config.data_source.db(), self.config);

@@ -62,6 +62,110 @@ pub struct Config {
     pub offset: i64,
     /// Data source for the application
     pub data_source: DataSource,
+    /// Forensic-mode counters incremented during the export. Atomic so
+    /// any code path holding `&Config` can bump them without re-plumbing
+    /// `&mut` access. Written to `forensic-summary.txt` and stderr at
+    /// the end of `run_export`.
+    pub forensic_counters: ForensicCounters,
+}
+
+/// Aggregate counters for forensic exports. Each is an
+/// [`std::sync::atomic::AtomicU64`] so writes are race-free even though
+/// the holder (`Config`) is shared as `&Config` across the export.
+#[derive(Debug, Default)]
+pub struct ForensicCounters {
+    pub messages_seen: std::sync::atomic::AtomicU64,
+    pub announcements_rendered: std::sync::atomic::AtomicU64,
+    pub messages_rendered_top_level: std::sync::atomic::AtomicU64,
+    pub tapback_bubbles_rendered: std::sync::atomic::AtomicU64,
+    pub dedupe_skips: std::sync::atomic::AtomicU64,
+    pub tapback_no_bubble_skips: std::sync::atomic::AtomicU64,
+    pub poll_vote_or_update_skips: std::sync::atomic::AtomicU64,
+    pub tapback_targets_missing: std::sync::atomic::AtomicU64,
+    pub tapback_targets_case_insensitive: std::sync::atomic::AtomicU64,
+    pub tapback_targets_unparseable: std::sync::atomic::AtomicU64,
+    pub reply_parents_missing: std::sync::atomic::AtomicU64,
+    pub reply_parents_case_insensitive: std::sync::atomic::AtomicU64,
+    pub reply_parents_unparseable: std::sync::atomic::AtomicU64,
+    pub parse_body_failures: std::sync::atomic::AtomicU64,
+    pub attachments_referenced: std::sync::atomic::AtomicU64,
+    pub attachments_file_not_found: std::sync::atomic::AtomicU64,
+}
+
+impl ForensicCounters {
+    /// Take a consistent snapshot of every counter. Calls Load(Relaxed)
+    /// since this is only read at end-of-export when nothing else is
+    /// writing. Returned as a flat record so callers can format it.
+    pub fn snapshot(&self) -> ForensicCountersSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        ForensicCountersSnapshot {
+            messages_seen: self.messages_seen.load(Relaxed),
+            announcements_rendered: self.announcements_rendered.load(Relaxed),
+            messages_rendered_top_level: self.messages_rendered_top_level.load(Relaxed),
+            tapback_bubbles_rendered: self.tapback_bubbles_rendered.load(Relaxed),
+            dedupe_skips: self.dedupe_skips.load(Relaxed),
+            tapback_no_bubble_skips: self.tapback_no_bubble_skips.load(Relaxed),
+            poll_vote_or_update_skips: self.poll_vote_or_update_skips.load(Relaxed),
+            tapback_targets_missing: self.tapback_targets_missing.load(Relaxed),
+            tapback_targets_case_insensitive: self.tapback_targets_case_insensitive.load(Relaxed),
+            tapback_targets_unparseable: self.tapback_targets_unparseable.load(Relaxed),
+            reply_parents_missing: self.reply_parents_missing.load(Relaxed),
+            reply_parents_case_insensitive: self.reply_parents_case_insensitive.load(Relaxed),
+            reply_parents_unparseable: self.reply_parents_unparseable.load(Relaxed),
+            parse_body_failures: self.parse_body_failures.load(Relaxed),
+            attachments_referenced: self.attachments_referenced.load(Relaxed),
+            attachments_file_not_found: self.attachments_file_not_found.load(Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ForensicCountersSnapshot {
+    pub messages_seen: u64,
+    pub announcements_rendered: u64,
+    pub messages_rendered_top_level: u64,
+    pub tapback_bubbles_rendered: u64,
+    pub dedupe_skips: u64,
+    pub tapback_no_bubble_skips: u64,
+    pub poll_vote_or_update_skips: u64,
+    pub tapback_targets_missing: u64,
+    pub tapback_targets_case_insensitive: u64,
+    pub tapback_targets_unparseable: u64,
+    pub reply_parents_missing: u64,
+    pub reply_parents_case_insensitive: u64,
+    pub reply_parents_unparseable: u64,
+    pub parse_body_failures: u64,
+    pub attachments_referenced: u64,
+    pub attachments_file_not_found: u64,
+}
+
+impl std::fmt::Display for ForensicCountersSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Forensic export summary")?;
+        writeln!(f, "=======================")?;
+        writeln!(f, "Streaming")?;
+        writeln!(f, "  messages seen in stream:           {}", self.messages_seen)?;
+        writeln!(f, "  rendered as announcement:          {}", self.announcements_rendered)?;
+        writeln!(f, "  rendered as top-level message:     {}", self.messages_rendered_top_level)?;
+        writeln!(f, "  rendered as tapback bubble:        {}", self.tapback_bubbles_rendered)?;
+        writeln!(f, "Skipped (visible placeholders in HTML)")?;
+        writeln!(f, "  duplicate rowid (#135 dedup):      {}", self.dedupe_skips)?;
+        writeln!(f, "  tapback row produced no bubble:    {}", self.tapback_no_bubble_skips)?;
+        writeln!(f, "  poll vote/update at top level:     {}", self.poll_vote_or_update_skips)?;
+        writeln!(f, "Reference-resolution outcomes")?;
+        writeln!(f, "  tapback targets missing in source: {}", self.tapback_targets_missing)?;
+        writeln!(f, "  tapback targets case-insensitive:  {}", self.tapback_targets_case_insensitive)?;
+        writeln!(f, "  tapback targets unparseable:       {}", self.tapback_targets_unparseable)?;
+        writeln!(f, "  reply parents missing in source:   {}", self.reply_parents_missing)?;
+        writeln!(f, "  reply parents case-insensitive:    {}", self.reply_parents_case_insensitive)?;
+        writeln!(f, "  reply parents unparseable:         {}", self.reply_parents_unparseable)?;
+        writeln!(f, "Per-row failures")?;
+        writeln!(f, "  attributedBody parse failures:     {}", self.parse_body_failures)?;
+        writeln!(f, "Attachments")?;
+        writeln!(f, "  attachments referenced:            {}", self.attachments_referenced)?;
+        writeln!(f, "  attachment file not found:         {}", self.attachments_file_not_found)?;
+        Ok(())
+    }
 }
 
 /// Emit a quick source-DB profile to stderr in `--forensic` mode so a
@@ -313,6 +417,7 @@ impl Config {
             options,
             offset: get_offset(),
             data_source,
+            forensic_counters: ForensicCounters::default(),
         })
     }
 
@@ -668,6 +773,7 @@ impl Config {
             options,
             offset: get_offset(),
             data_source,
+            forensic_counters: ForensicCounters::default(),
         }
     }
 

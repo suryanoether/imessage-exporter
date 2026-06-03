@@ -265,14 +265,25 @@ where
     // output buffer. Capacity grows naturally to fit the largest message
     // and `clear()` retains it.
     let mut msg_buf = String::with_capacity(W::BUFFER_CAPACITY);
+    use std::sync::atomic::Ordering::Relaxed;
     for message in Message::rows(&mut statement, [])? {
         let mut msg = message?;
+        writer
+            .config()
+            .forensic_counters
+            .messages_seen
+            .fetch_add(1, Relaxed);
 
         let forensic = writer.config().options.forensic;
 
         // Early escape if we try and render the same message GUID twice
         // See https://github.com/ReagentX/imessage-exporter/issues/135
         if msg.rowid == current_message_row {
+            writer
+                .config()
+                .forensic_counters
+                .dedupe_skips
+                .fetch_add(1, Relaxed);
             if forensic {
                 eprintln!(
                     "[forensic] skipped duplicate rowid={} guid={} (deduplication for issue #135)",
@@ -287,11 +298,23 @@ where
         current_message_row = msg.rowid;
 
         let body_ok = apply_body(&mut msg, writer.config().data_source.db(), writer.config());
-        if !body_ok && forensic {
-            writer.state_mut().forensic_parse_failures.insert(msg.rowid);
+        if !body_ok {
+            writer
+                .config()
+                .forensic_counters
+                .parse_body_failures
+                .fetch_add(1, Relaxed);
+            if forensic {
+                writer.state_mut().forensic_parse_failures.insert(msg.rowid);
+            }
         }
 
         if msg.is_announcement() {
+            writer
+                .config()
+                .forensic_counters
+                .announcements_rendered
+                .fetch_add(1, Relaxed);
             msg_buf.clear();
             writer.format_announcement(&msg, &mut msg_buf);
             let file = get_or_create_file_for(writer, &msg)?;
@@ -305,9 +328,11 @@ where
             msg_buf.clear();
             let rendered = writer.format_tapback_bubble(&msg)?;
             if rendered.is_empty() {
-                // The bubble was deliberately empty: writer doesn't
-                // support a per-row tapback render (e.g. TXT) or the
-                // row's variant didn't match what is_tapback() implied.
+                writer
+                    .config()
+                    .forensic_counters
+                    .tapback_no_bubble_skips
+                    .fetch_add(1, Relaxed);
                 eprintln!(
                     "[forensic] tapback row produced no bubble: rowid={} guid={} associated_type={:?}",
                     msg.rowid, msg.guid, msg.associated_message_type,
@@ -315,6 +340,11 @@ where
                 let file = get_or_create_file_for(writer, &msg)?;
                 W::write_skip_marker(file, "tapback row without bubble", &msg)?;
             } else {
+                writer
+                    .config()
+                    .forensic_counters
+                    .tapback_bubbles_rendered
+                    .fetch_add(1, Relaxed);
                 msg_buf.push_str(&rendered);
                 let file = get_or_create_file_for(writer, &msg)?;
                 file.write_all(msg_buf.as_bytes())?;
@@ -322,13 +352,21 @@ where
         }
         // Message tapbacks and poll votes are rendered in context, so no need to render them separately
         else if !msg.is_tapback() && !msg.is_poll_vote() && !msg.is_poll_update() {
+            writer
+                .config()
+                .forensic_counters
+                .messages_rendered_top_level
+                .fetch_add(1, Relaxed);
             msg_buf.clear();
             writer.format_message_into(&msg, RenderContext::TopLevel, &mut msg_buf)?;
             let file = get_or_create_file_for(writer, &msg)?;
             file.write_all(msg_buf.as_bytes())?;
         } else if forensic && (msg.is_poll_vote() || msg.is_poll_update()) {
-            // Poll vote / poll-update rows render under their parent
-            // poll. The reviewer should still see the row was here.
+            writer
+                .config()
+                .forensic_counters
+                .poll_vote_or_update_skips
+                .fetch_add(1, Relaxed);
             eprintln!(
                 "[forensic] skipped poll-vote/poll-update at top level (renders under parent): rowid={} guid={}",
                 msg.rowid, msg.guid,
@@ -356,6 +394,34 @@ where
     }
     W::write_file_footer(&mut state.orphaned)?;
     state.orphaned.flush()?;
+
+    // Forensic summary: dump the counters both to stderr (so the user
+    // sees them at the end of the run) and to a `forensic-summary.txt`
+    // sitting next to the exported files (so a court reviewer has a
+    // single document describing what's complete and what isn't).
+    let config = writer.config();
+    if config.options.forensic {
+        let snapshot = config.forensic_counters.snapshot();
+        eprintln!();
+        eprintln!("{snapshot}");
+        let summary_path = config.options.export_path.join("forensic-summary.txt");
+        match std::fs::File::create(&summary_path) {
+            Ok(mut f) => {
+                if let Err(e) = write!(f, "{snapshot}") {
+                    eprintln!(
+                        "warning: failed to write forensic summary to {}: {e}",
+                        summary_path.display()
+                    );
+                } else {
+                    eprintln!("forensic summary written to {}", summary_path.display());
+                }
+            }
+            Err(e) => eprintln!(
+                "warning: could not create forensic summary at {}: {e}",
+                summary_path.display()
+            ),
+        }
+    }
 
     Ok(())
 }
